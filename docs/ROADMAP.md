@@ -22,7 +22,7 @@
 
 | Feature | Priority | Area |
 |---|---|---|
-| *(none yet)* | | |
+| mpv C plugin client (Zig) | P1 | Clients / Local Players |
 
 ---
 

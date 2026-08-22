@@ -75,6 +75,7 @@ Both the official KoalaSync website and the browser extension feature dynamic lo
 
 - `extension/`: Browser Extension (Chrome & Firefox).
 - `server/`: Node.js + Socket.IO Relay Server (Containerized).
+- `clients/mpv/`: Native mpv C plugin (Zig) for local player sync.
 - `website/`: Marketing landing page & Invitation Bridge.
 - `shared/`: **Single Source of Truth** for protocol constants.
 - `scripts/`: Automated build and synchronization utilities.
