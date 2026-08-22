@@ -9,6 +9,8 @@
   },
   "scripts": {
     "build:extension": "node scripts/build-extension.cjs",
+    "build:mpv": "node clients/mpv/scripts/sync-constants.js && cd clients/mpv && zig build -Doptimize=ReleaseSafe",
+    "sync:mpv-constants": "node clients/mpv/scripts/sync-constants.js",
     "indexnow": "node website/submit-indexnow.cjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
