@@ -35,11 +35,16 @@ Thumbs.db
 dist/
 build/
 coverage/
+zig-out/
+.zig-cache/
+clients/mpv/zig-out/
+clients/mpv/.zig-cache/
 
 # KoalaSync Specific
-# We ignore the synced files in the extension folder to ensure 
+# We ignore the synced files in the extension folder and client folders to ensure 
 # the root 'shared/' remains the Single Source of Truth.
 extension/shared/
+clients/mpv/src/constants.zig
 
 # Auto-generated website build output
 website/www/
