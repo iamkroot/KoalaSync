@@ -71,6 +71,12 @@ fn main_impl(handle: mpv.Handle) !void {
     );
     defer session.deinit();
 
+    // ── Check initial media title if already loaded ────────────
+    if (mpv.getPropertyString(handle, allocator, "media-title") catch null) |initial_title| {
+        session.setMediaTitle(initial_title);
+        allocator.free(initial_title);
+    }
+
     // ── Spawn network thread ────────────────────────────────────
     const net_thread = try std.Thread.spawn(.{}, protocol.Session.networkLoop, .{&session});
 
@@ -149,7 +155,14 @@ fn main_impl(handle: mpv.Handle) !void {
                         }
                     },
                     UD_MEDIA_TITLE => {
-                        // Title changed — future: episode sync
+                        if (prop.data) |data| {
+                            const str_ptr = @as(*const ?[*:0]const u8, @ptrCast(@alignCast(data))).*;
+                            if (str_ptr) |s| {
+                                session.setMediaTitle(std.mem.sliceTo(s, 0));
+                            } else {
+                                session.setMediaTitle("");
+                            }
+                        }
                     },
                     else => {},
                 }
@@ -197,6 +210,26 @@ fn main_impl(handle: mpv.Handle) !void {
                     last_pause_state = false;
                     mpv.setPropertyFlag(handle, "pause", false) catch {};
                     mpv.osdMessage(handle, allocator, "▶ Synced", .{}, 1.5);
+                },
+                .initial_sync => {
+                    joined_shown = true;
+                    const is_playing = (cmd.playback_state orelse .paused) == .playing;
+                    guard.remote_seek_target = cmd.time;
+                    guard.suppress_time = true;
+                    guard.suppress_pause = true;
+                    last_pause_state = !is_playing;
+                    mpv.setPropertyDouble(handle, "time-pos", cmd.time) catch {};
+                    mpv.setPropertyFlag(handle, "pause", !is_playing) catch {};
+
+                    const symbol: []const u8 = if (is_playing) "▶" else "⏸";
+                    mpv.osdMessage(handle, allocator, "KoalaSync: joined room \"{s}\" ({s} {d:.0}s) ✓", .{ cfg.room, symbol, cmd.time }, 3.5);
+                },
+                .control_mode_changed => {
+                    mpv.osdMessage(handle, allocator, "KoalaSync: control mode is \"{s}\"", .{cmd.text()}, 3.0);
+                },
+                .error_msg => {
+                    mpv.osdMessage(handle, allocator, "KoalaSync error: {s}", .{cmd.text()}, 5.0);
+                    mpv.log(handle, allocator, "Error from relay: {s}", .{cmd.text()});
                 },
                 .noop => {
                     if (!joined_shown) {

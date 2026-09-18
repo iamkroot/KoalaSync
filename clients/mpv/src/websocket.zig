@@ -329,7 +329,6 @@ pub const Client = struct {
                     continue;
                 },
                 .close => {
-                    self.allocator.free(payload);
                     self.closed = true;
                     return error.ConnectionClosed;
                 },

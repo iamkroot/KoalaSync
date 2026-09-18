@@ -98,7 +98,7 @@ zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-windows-gnu
 The plugin runs entirely inside mpv's process:
 
 1. **mpv hooks** — Observes `pause`, `time-pos`, and `media-title` properties via `mpv_observe_property`.
-2. **WebSocket + TLS** — Connects to the relay using Zig's stdlib (`std.net` + `std.crypto.tls`).
+2. **WebSocket + TLS** — Connects to the relay using POSIX sockets and OpenSSL for TLS.
 3. **Socket.IO EIO=4** — Speaks the same wire protocol as the browser extension.
 4. **Loop guard** — Suppresses echo events when applying remote commands (same pattern as the browser extension's `expectedEvents`).
 5. **Heartbeat** — Sends `peer_status` every 15 seconds.
@@ -129,29 +129,32 @@ This preserves the repository's **single source of truth** principle. Run this a
 | Feature | Status |
 |---------|--------|
 | Connect to relay (WS + TLS + Socket.IO) | ✅ |
-| Join room with password | ✅ |
+| Join room with password & capabilities | ✅ |
 | Send/receive play, pause, seek | ✅ |
+| Canonical Media State v1 recovery | ✅ |
+| Event ACK & peer RTT ping/pong | ✅ |
+| Media title tracking & broadcast | ✅ |
 | Peer status heartbeat (15s) | ✅ |
+| Host Control Mode status display | ✅ |
 | Reconnection with backoff | ✅ |
 | Loop guard (echo suppression) | ✅ |
-| OSD status messages | ✅ |
-| Config via script-opts | ✅ |
+| Relay error reporting via OSD | ✅ |
+| Config via script-opts & conf file | ✅ |
 | Cross-platform builds | ✅ |
-| Force sync | ✅ |
+| Force sync (prepare & execute) | ✅ |
 
 ### Planned
 
 - Episode auto-sync
 - Chat via OSD
-- Host control mode (active participation)
+- Host control mode (active moderation)
 
 ---
 
 ## Requirements
 
-- **Build**: [Zig](https://ziglang.org/download/) ≥ 0.16.0, Node.js (for constants sync only)
+- **Build**: [Zig](https://ziglang.org/download/) ≥ 0.16.0, Node.js (for constants sync), OpenSSL (`libssl`, `libcrypto`)
 - **Runtime**: mpv with cplugin support (standard in mpv builds since 0.35)
-- **No runtime dependencies** — the compiled plugin is self-contained
 
 ---
 

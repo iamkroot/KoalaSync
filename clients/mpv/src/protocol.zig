@@ -20,7 +20,9 @@ pub const State = enum {
 pub const MpvCommand = struct {
     action: Action,
     time: f64 = 0,
-    sender_id: ?[]const u8 = null,
+    playback_state: ?PlaybackState = null,
+    text_buf: [128]u8 = [_]u8{0} ** 128,
+    text_len: u8 = 0,
 
     pub const Action = enum {
         play,
@@ -29,7 +31,25 @@ pub const MpvCommand = struct {
         noop,
         force_sync_prepare,
         force_sync_execute,
+        initial_sync,
+        control_mode_changed,
+        error_msg,
     };
+
+    pub const PlaybackState = enum {
+        playing,
+        paused,
+    };
+
+    pub fn text(self: *const MpvCommand) []const u8 {
+        return self.text_buf[0..self.text_len];
+    }
+
+    pub fn setText(self: *MpvCommand, str: []const u8) void {
+        const len = @min(str.len, self.text_buf.len);
+        @memcpy(self.text_buf[0..len], str[0..len]);
+        self.text_len = @intCast(len);
+    }
 };
 
 /// An event from mpv to send to the relay.
@@ -55,6 +75,7 @@ pub const Session = struct {
     password: []const u8,
     peer_id: []const u8,
     username: []const u8,
+    media_title: ?[]u8 = null,
 
     // Protocol state
     seq: u32 = 0,
@@ -181,6 +202,19 @@ pub const Session = struct {
         self.allocator.free(self.password);
         self.allocator.free(self.peer_id);
         self.allocator.free(self.username);
+        if (self.media_title) |mt| self.allocator.free(mt);
+    }
+
+    /// Update the current media title. Thread-safe.
+    pub fn setMediaTitle(self: *Session, title: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.media_title) |old| self.allocator.free(old);
+        if (title.len == 0) {
+            self.media_title = null;
+        } else {
+            self.media_title = self.allocator.dupe(u8, title) catch null;
+        }
     }
 
     // ── Thread-safe interface for the mpv thread ────────────────
@@ -309,34 +343,54 @@ pub const Session = struct {
     fn handleEvent(self: *Session, event: []const u8, data: ?[]const u8) !void {
         if (std.mem.eql(u8, event, K.events.room_data)) {
             self.state = .joined;
-            // Queue a noop to signal the mpv thread we're connected
+
+            var maybe_ms: ?sio.MediaStateSnapshot = null;
+            if (data) |d| {
+                maybe_ms = sio.parseMediaState(d, self.allocator);
+            }
+
             self.mutex.lock();
             defer self.mutex.unlock();
-            self.incoming.push(.{ .action = .noop });
+
+            if (maybe_ms) |ms| {
+                self.incoming.push(.{
+                    .action = .initial_sync,
+                    .time = ms.current_time,
+                    .playback_state = switch (ms.playback_state) {
+                        .playing => .playing,
+                        .paused => .paused,
+                    },
+                });
+            } else {
+                self.incoming.push(.{ .action = .noop });
+            }
             return;
         }
 
         if (std.mem.eql(u8, event, K.events.play)) {
             const time = if (data) |d| sio.jsonGetNumber(d, "currentTime", self.allocator) orelse 0 else 0;
             self.mutex.lock();
-            defer self.mutex.unlock();
             self.incoming.push(.{ .action = .play, .time = time });
+            self.mutex.unlock();
+            self.maybeAck(data);
             return;
         }
 
         if (std.mem.eql(u8, event, K.events.pause)) {
             const time = if (data) |d| sio.jsonGetNumber(d, "currentTime", self.allocator) orelse 0 else 0;
             self.mutex.lock();
-            defer self.mutex.unlock();
             self.incoming.push(.{ .action = .pause, .time = time });
+            self.mutex.unlock();
+            self.maybeAck(data);
             return;
         }
 
         if (std.mem.eql(u8, event, K.events.seek)) {
             const time = if (data) |d| sio.jsonGetNumber(d, "targetTime", self.allocator) orelse 0 else 0;
             self.mutex.lock();
-            defer self.mutex.unlock();
             self.incoming.push(.{ .action = .seek, .time = time });
+            self.mutex.unlock();
+            self.maybeAck(data);
             return;
         }
 
@@ -348,6 +402,7 @@ pub const Session = struct {
 
             // Acknowledge prepare immediately so initiator can fire execute
             self.sendForceSyncAck() catch {};
+            self.maybeAck(data);
             return;
         }
 
@@ -355,23 +410,91 @@ pub const Session = struct {
             self.mutex.lock();
             self.incoming.push(.{ .action = .force_sync_execute });
             self.mutex.unlock();
+            self.maybeAck(data);
+            return;
+        }
+
+        if (std.mem.eql(u8, event, K.events.ping)) {
+            if (data) |d| {
+                const t = sio.jsonGetNumber(d, "t", self.allocator);
+                const sender = sio.jsonGetString(d, "sender", self.allocator);
+                defer if (sender) |s| self.allocator.free(s);
+                if (t) |timestamp| {
+                    self.sendPong(timestamp, sender) catch {};
+                }
+            }
+            return;
+        }
+
+        if (std.mem.eql(u8, event, K.events.control_mode)) {
+            if (data) |d| {
+                if (sio.jsonGetString(d, "controlMode", self.allocator)) |mode| {
+                    defer self.allocator.free(mode);
+                    self.mutex.lock();
+                    var cmd = MpvCommand{ .action = .control_mode_changed };
+                    cmd.setText(mode);
+                    self.incoming.push(cmd);
+                    self.mutex.unlock();
+                }
+            }
             return;
         }
 
         if (std.mem.eql(u8, event, K.events.@"error")) {
-            // Server error — will disconnect
+            if (data) |d| {
+                if (sio.jsonGetString(d, "message", self.allocator)) |msg| {
+                    defer self.allocator.free(msg);
+                    self.mutex.lock();
+                    var cmd = MpvCommand{ .action = .error_msg };
+                    cmd.setText(msg);
+                    self.incoming.push(cmd);
+                    self.mutex.unlock();
+                }
+            }
             return;
         }
+    }
+
+    fn maybeAck(self: *Session, data: ?[]const u8) void {
+        const d = data orelse return;
+        const sender_id = sio.jsonGetString(d, "senderId", self.allocator) orelse return;
+        defer self.allocator.free(sender_id);
+        const action_ts = sio.jsonGetNumber(d, "actionTimestamp", self.allocator) orelse return;
+        self.sendEventAck(sender_id, @intFromFloat(action_ts)) catch {};
     }
 
     // ── Outgoing messages ───────────────────────────────────────
 
     fn sendJoinRoom(self: *Session) !void {
-        const json = try std.fmt.allocPrint(self.allocator,
-            "{{\"roomId\":\"{s}\",\"peerId\":\"{s}\",\"username\":\"{s}\"" ++
-                ",\"password\":\"{s}\",\"protocolVersion\":\"{s}\"}}",
-            .{ self.room_id, self.peer_id, self.username, self.password, K.protocol_version },
-        );
+        self.mutex.lock();
+        const current_title = if (self.media_title) |mt| self.allocator.dupe(u8, mt) catch null else null;
+        self.mutex.unlock();
+        defer if (current_title) |mt| self.allocator.free(mt);
+
+        const enc_room = try sio.encodeJsonString(self.allocator, self.room_id);
+        defer self.allocator.free(enc_room);
+        const enc_peer = try sio.encodeJsonString(self.allocator, self.peer_id);
+        defer self.allocator.free(enc_peer);
+        const enc_user = try sio.encodeJsonString(self.allocator, self.username);
+        defer self.allocator.free(enc_user);
+        const enc_pass = try sio.encodeJsonString(self.allocator, self.password);
+        defer self.allocator.free(enc_pass);
+        const enc_proto = try sio.encodeJsonString(self.allocator, K.protocol_version);
+        defer self.allocator.free(enc_proto);
+
+        const enc_media_title = if (current_title) |ct| try sio.encodeJsonString(self.allocator, ct) else null;
+        defer if (enc_media_title) |emt| self.allocator.free(emt);
+
+        const json = if (enc_media_title) |emt|
+            try std.fmt.allocPrint(self.allocator,
+                "{{\"roomId\":{s},\"peerId\":{s},\"username\":{s},\"password\":{s},\"protocolVersion\":{s},\"mediaTitle\":{s},\"clientCapabilities\":[\"{s}\"]}}",
+                .{ enc_room, enc_peer, enc_user, enc_pass, enc_proto, emt, K.capabilities.media_state_v1 },
+            )
+        else
+            try std.fmt.allocPrint(self.allocator,
+                "{{\"roomId\":{s},\"peerId\":{s},\"username\":{s},\"password\":{s},\"protocolVersion\":{s},\"clientCapabilities\":[\"{s}\"]}}",
+                .{ enc_room, enc_peer, enc_user, enc_pass, enc_proto, K.capabilities.media_state_v1 },
+            );
         defer self.allocator.free(json);
 
         const pkt = try sio.encodeEvent(self.allocator, K.events.join_room, json);
@@ -390,13 +513,50 @@ pub const Session = struct {
 
     fn sendForceSyncAck(self: *Session) !void {
         self.seq += 1;
+        const enc_peer = try sio.encodeJsonString(self.allocator, self.peer_id);
+        defer self.allocator.free(enc_peer);
+
         const json = try std.fmt.allocPrint(self.allocator,
-            "{{\"peerId\":\"{s}\",\"seq\":{d}}}",
-            .{ self.peer_id, self.seq },
+            "{{\"peerId\":{s},\"seq\":{d}}}",
+            .{ enc_peer, self.seq },
         );
         defer self.allocator.free(json);
 
         const pkt = try sio.encodeEvent(self.allocator, K.events.force_sync_ack, json);
+        defer self.allocator.free(pkt);
+
+        var ws = &(self.ws orelse return error.ConnectionFailed);
+        try ws.sendText(pkt);
+    }
+
+    fn sendEventAck(self: *Session, target_id: []const u8, action_timestamp: i64) !void {
+        const enc_target = try sio.encodeJsonString(self.allocator, target_id);
+        defer self.allocator.free(enc_target);
+
+        const json = try std.fmt.allocPrint(self.allocator,
+            "{{\"targetId\":{s},\"actionTimestamp\":{d}}}",
+            .{ enc_target, action_timestamp },
+        );
+        defer self.allocator.free(json);
+
+        const pkt = try sio.encodeEvent(self.allocator, K.events.event_ack, json);
+        defer self.allocator.free(pkt);
+
+        var ws = &(self.ws orelse return error.ConnectionFailed);
+        try ws.sendText(pkt);
+    }
+
+    fn sendPong(self: *Session, t: f64, target: ?[]const u8) !void {
+        const enc_target = if (target) |tgt| try sio.encodeJsonString(self.allocator, tgt) else null;
+        defer if (enc_target) |et| self.allocator.free(et);
+
+        const json = if (enc_target) |et|
+            try std.fmt.allocPrint(self.allocator, "{{\"t\":{d:.0},\"target\":{s}}}", .{ t, et })
+        else
+            try std.fmt.allocPrint(self.allocator, "{{\"t\":{d:.0}}}", .{ t });
+        defer self.allocator.free(json);
+
+        const pkt = try sio.encodeEvent(self.allocator, K.events.pong, json);
         defer self.allocator.free(pkt);
 
         var ws = &(self.ws orelse return error.ConnectionFailed);
@@ -423,10 +583,25 @@ pub const Session = struct {
     fn sendPlayPause(self: *Session, event: []const u8, time: f64) !void {
         self.seq += 1;
         const playback_state = if (std.mem.eql(u8, event, K.events.pause)) "paused" else "playing";
-        const json = try std.fmt.allocPrint(self.allocator,
-            "{{\"currentTime\":{d:.3},\"playbackState\":\"{s}\",\"seq\":{d},\"actionTimestamp\":{d}}}",
-            .{ time, playback_state, self.seq, time_mod.milliTimestamp() },
-        );
+
+        self.mutex.lock();
+        const current_title = if (self.media_title) |mt| self.allocator.dupe(u8, mt) catch null else null;
+        self.mutex.unlock();
+        defer if (current_title) |mt| self.allocator.free(mt);
+
+        const enc_media_title = if (current_title) |ct| try sio.encodeJsonString(self.allocator, ct) else null;
+        defer if (enc_media_title) |emt| self.allocator.free(emt);
+
+        const json = if (enc_media_title) |emt|
+            try std.fmt.allocPrint(self.allocator,
+                "{{\"currentTime\":{d:.3},\"playbackState\":\"{s}\",\"seq\":{d},\"actionTimestamp\":{d},\"mediaTitle\":{s}}}",
+                .{ time, playback_state, self.seq, time_mod.milliTimestamp(), emt },
+            )
+        else
+            try std.fmt.allocPrint(self.allocator,
+                "{{\"currentTime\":{d:.3},\"playbackState\":\"{s}\",\"seq\":{d},\"actionTimestamp\":{d}}}",
+                .{ time, playback_state, self.seq, time_mod.milliTimestamp() },
+            );
         defer self.allocator.free(json);
 
         const pkt = try sio.encodeEvent(self.allocator, event, json);
@@ -438,10 +613,25 @@ pub const Session = struct {
 
     fn sendSeek(self: *Session, time: f64) !void {
         self.seq += 1;
-        const json = try std.fmt.allocPrint(self.allocator,
-            "{{\"targetTime\":{d:.3},\"seq\":{d},\"actionTimestamp\":{d}}}",
-            .{ time, self.seq, time_mod.milliTimestamp() },
-        );
+
+        self.mutex.lock();
+        const current_title = if (self.media_title) |mt| self.allocator.dupe(u8, mt) catch null else null;
+        self.mutex.unlock();
+        defer if (current_title) |mt| self.allocator.free(mt);
+
+        const enc_media_title = if (current_title) |ct| try sio.encodeJsonString(self.allocator, ct) else null;
+        defer if (enc_media_title) |emt| self.allocator.free(emt);
+
+        const json = if (enc_media_title) |emt|
+            try std.fmt.allocPrint(self.allocator,
+                "{{\"targetTime\":{d:.3},\"seq\":{d},\"actionTimestamp\":{d},\"mediaTitle\":{s}}}",
+                .{ time, self.seq, time_mod.milliTimestamp(), emt },
+            )
+        else
+            try std.fmt.allocPrint(self.allocator,
+                "{{\"targetTime\":{d:.3},\"seq\":{d},\"actionTimestamp\":{d}}}",
+                .{ time, self.seq, time_mod.milliTimestamp() },
+            );
         defer self.allocator.free(json);
 
         const pkt = try sio.encodeEvent(self.allocator, K.events.seek, json);
@@ -453,11 +643,30 @@ pub const Session = struct {
 
     fn sendHeartbeat(self: *Session, time: f64, paused: bool) !void {
         const playback_state = if (paused) "paused" else "playing";
-        const json = try std.fmt.allocPrint(self.allocator,
-            "{{\"peerId\":\"{s}\",\"username\":\"{s}\",\"currentTime\":{d:.3}" ++
-                ",\"playbackState\":\"{s}\",\"status\":\"heartbeat\"}}",
-            .{ self.peer_id, self.username, time, playback_state },
-        );
+
+        self.mutex.lock();
+        const current_title = if (self.media_title) |mt| self.allocator.dupe(u8, mt) catch null else null;
+        self.mutex.unlock();
+        defer if (current_title) |mt| self.allocator.free(mt);
+
+        const enc_peer = try sio.encodeJsonString(self.allocator, self.peer_id);
+        defer self.allocator.free(enc_peer);
+        const enc_user = try sio.encodeJsonString(self.allocator, self.username);
+        defer self.allocator.free(enc_user);
+
+        const enc_media_title = if (current_title) |ct| try sio.encodeJsonString(self.allocator, ct) else null;
+        defer if (enc_media_title) |emt| self.allocator.free(emt);
+
+        const json = if (enc_media_title) |emt|
+            try std.fmt.allocPrint(self.allocator,
+                "{{\"peerId\":{s},\"username\":{s},\"currentTime\":{d:.3},\"playbackState\":\"{s}\",\"mediaTitle\":{s},\"status\":\"heartbeat\"}}",
+                .{ enc_peer, enc_user, time, playback_state, emt },
+            )
+        else
+            try std.fmt.allocPrint(self.allocator,
+                "{{\"peerId\":{s},\"username\":{s},\"currentTime\":{d:.3},\"playbackState\":\"{s}\",\"status\":\"heartbeat\"}}",
+                .{ enc_peer, enc_user, time, playback_state },
+            );
         defer self.allocator.free(json);
 
         const pkt = try sio.encodeEvent(self.allocator, K.events.peer_status, json);
