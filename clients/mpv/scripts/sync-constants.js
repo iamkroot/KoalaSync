@@ -32,20 +32,46 @@ function extractNum(name) {
     return m ? Number(m[1]) : null;
 }
 
-// ── Extract EVENTS object ───────────────────────────────────────
-function extractEvents() {
-    const block = src.match(/export\s+const\s+EVENTS\s*=\s*\{([\s\S]*?)\};/);
-    if (!block) throw new Error('Could not find EVENTS in shared/constants.js');
+// ── Extract object dictionary constants ─────────────────────────
+function extractObject(name) {
+    const block = src.match(new RegExp(`export\\s+const\\s+${name}\\s*=\\s*\\{([\\s\\S]*?)\\};`));
+    if (!block) return [];
     const entries = [];
     for (const line of block[1].split('\n')) {
-        const m = line.match(/^\s*(\w+)\s*:\s*"([^"]+)"/);
+        const m = line.match(/^\s*(\w+)\s*:\s*['"]([^'"]+)['"]/);
         if (m) entries.push([m[1], m[2]]);
     }
     return entries;
 }
 
+function toZigIdent(key) {
+    const name = key.toLowerCase().replace(/-/g, '_');
+    const keywords = ['error', 'export', 'pub', 'const', 'var', 'type', 'fn'];
+    return keywords.includes(name) ? `@"${name}"` : name;
+}
+
+function buildStruct(structName, doc, entries) {
+    const res = [
+        `/// ${doc}`,
+        `pub const ${structName} = struct {`,
+    ];
+    for (const [key, value] of entries) {
+        const ident = toZigIdent(key);
+        res.push(`    pub const ${ident} = "${value}";`);
+    }
+    res.push('};');
+    return res;
+}
+
 // ── Build Zig source ────────────────────────────────────────────
-const events = extractEvents();
+const events = extractObject('EVENTS');
+const capabilities = extractObject('CAPABILITIES');
+const controlModes = extractObject('CONTROL_MODES');
+const errorCodes = extractObject('ERROR_CODES');
+
+const forceSyncTimeout = extractNum('FORCE_SYNC_TIMEOUT') || 8500;
+const forceSyncTargetDelayWarning = forceSyncTimeout + 2000;
+
 const lines = [
     '// AUTO-GENERATED from shared/constants.js — do not edit manually.',
     '// Run:  node clients/mpv/scripts/sync-constants.js',
@@ -57,23 +83,25 @@ const lines = [
     `pub const official_server_url = "${extract('OFFICIAL_SERVER_URL')}";`,
     `pub const official_server_token = "${extract('OFFICIAL_SERVER_TOKEN')}";`,
     '',
+    `pub const max_media_time: f64 = ${extractNum('MAX_MEDIA_TIME') || 86400};`,
     `pub const heartbeat_interval_ms: u64 = ${extractNum('HEARTBEAT_INTERVAL')};`,
-    `pub const force_sync_timeout_ms: u64 = ${extractNum('FORCE_SYNC_TIMEOUT')};`,
+    `pub const force_sync_timeout_ms: u64 = ${forceSyncTimeout};`,
+    `pub const force_sync_target_delay_warning_ms: u64 = ${forceSyncTargetDelayWarning};`,
     `pub const episode_lobby_timeout_ms: u64 = ${extractNum('EPISODE_LOBBY_TIMEOUT')};`,
+    `pub const episode_sync_v2_load_timeout_ms: u64 = ${extractNum('EPISODE_SYNC_V2_LOAD_TIMEOUT') || 120000};`,
+    `pub const episode_sync_v2_prepare_timeout_ms: u64 = ${extractNum('EPISODE_SYNC_V2_PREPARE_TIMEOUT') || 15000};`,
+    `pub const episode_sync_v2_execute_timeout_ms: u64 = ${extractNum('EPISODE_SYNC_V2_EXECUTE_TIMEOUT') || 10000};`,
+    `pub const episode_sync_v2_stability_ms: u64 = ${extractNum('EPISODE_SYNC_V2_STABILITY_MS') || 1000};`,
     '',
-    '/// Socket.IO event names — mirrors shared/constants.js EVENTS.',
-    'pub const events = struct {',
+    ...buildStruct('events', 'Socket.IO event names — mirrors shared/constants.js EVENTS.', events),
+    '',
+    ...buildStruct('capabilities', 'Server capability flags — mirrors shared/constants.js CAPABILITIES.', capabilities),
+    '',
+    ...buildStruct('control_modes', 'Room control modes — mirrors shared/constants.js CONTROL_MODES.', controlModes),
+    '',
+    ...buildStruct('error_codes', 'Stable server error identifiers — mirrors shared/constants.js ERROR_CODES.', errorCodes),
+    '',
 ];
-
-for (const [key, value] of events) {
-    const zigName = key.toLowerCase();
-    // "error" is a Zig keyword — use @"error" syntax.
-    const ident = zigName === 'error' ? '@"error"' : zigName;
-    lines.push(`    pub const ${ident} = "${value}";`);
-}
-
-lines.push('};');
-lines.push('');
 
 writeFileSync(OUTPUT, lines.join('\n'));
 console.log(`✓ Generated ${OUTPUT}`);

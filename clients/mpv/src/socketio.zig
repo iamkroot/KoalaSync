@@ -144,8 +144,128 @@ pub fn encodePong() []const u8 {
 
 // ── JSON helpers ────────────────────────────────────────────────
 
+/// Encode string as a JSON string literal with outer quotes and proper escaping.
+/// Caller must free returned memory with `allocator.free()`.
+pub fn encodeJsonString(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var extra: usize = 2; // For outer quotes
+    for (s) |ch| {
+        switch (ch) {
+            '"', '\\', '\n', '\r', '\t' => extra += 1,
+            0...8, 11...12, 14...0x1F => extra += 5,
+            else => {},
+        }
+    }
+
+    var buf = try allocator.alloc(u8, s.len + extra);
+    var idx: usize = 0;
+    buf[idx] = '"';
+    idx += 1;
+
+    for (s) |ch| {
+        switch (ch) {
+            '"' => {
+                buf[idx] = '\\';
+                buf[idx + 1] = '"';
+                idx += 2;
+            },
+            '\\' => {
+                buf[idx] = '\\';
+                buf[idx + 1] = '\\';
+                idx += 2;
+            },
+            '\n' => {
+                buf[idx] = '\\';
+                buf[idx + 1] = 'n';
+                idx += 2;
+            },
+            '\r' => {
+                buf[idx] = '\\';
+                buf[idx + 1] = 'r';
+                idx += 2;
+            },
+            '\t' => {
+                buf[idx] = '\\';
+                buf[idx + 1] = 't';
+                idx += 2;
+            },
+            0...8, 11...12, 14...0x1F => {
+                const hex_chars = "0123456789abcdef";
+                buf[idx] = '\\';
+                buf[idx + 1] = 'u';
+                buf[idx + 2] = '0';
+                buf[idx + 3] = '0';
+                buf[idx + 4] = hex_chars[(ch >> 4) & 0xF];
+                buf[idx + 5] = hex_chars[ch & 0xF];
+                idx += 6;
+            },
+            else => {
+                buf[idx] = ch;
+                idx += 1;
+            },
+        }
+    }
+
+    buf[idx] = '"';
+    idx += 1;
+    return buf[0..idx];
+}
+
+/// Canonical Media State snapshot parsed from room_data.
+pub const MediaStateSnapshot = struct {
+    current_time: f64,
+    playback_state: PlaybackState,
+
+    pub const PlaybackState = enum {
+        playing,
+        paused,
+    };
+};
+
+/// Parse canonical mediaState object from room_data JSON payload.
+/// Returns null if mediaState is null, missing, or malformed.
+pub fn parseMediaState(json_bytes: []const u8, allocator: std.mem.Allocator) ?MediaStateSnapshot {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch return null;
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |o| o,
+        else => return null,
+    };
+
+    const ms_val = root.get("mediaState") orelse return null;
+    const ms_obj = switch (ms_val) {
+        .object => |o| o,
+        else => return null,
+    };
+
+    const time_val = ms_obj.get("currentTime") orelse return null;
+    const current_time: f64 = switch (time_val) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => return null,
+    };
+
+    const state_val = ms_obj.get("playbackState") orelse return null;
+    const state_str = switch (state_val) {
+        .string => |s| s,
+        else => return null,
+    };
+
+    const state: MediaStateSnapshot.PlaybackState = if (std.mem.eql(u8, state_str, "playing"))
+        .playing
+    else if (std.mem.eql(u8, state_str, "paused"))
+        .paused
+    else
+        return null;
+
+    return .{
+        .current_time = current_time,
+        .playback_state = state,
+    };
+}
+
 /// Extract a string field from a JSON object blob.
-/// Returns a slice into `json_bytes` — does not allocate.
+/// Caller must free returned memory with `allocator.free()`.
 pub fn jsonGetString(json_bytes: []const u8, key: []const u8, allocator: std.mem.Allocator) ?[]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch return null;
     defer parsed.deinit();
@@ -202,4 +322,38 @@ test "encode Socket.IO events" {
     const enc = try encodeEvent(allocator, "seek", "{\"targetTime\":123.45}");
     defer allocator.free(enc);
     try std.testing.expectEqualStrings("42[\"seek\",{\"targetTime\":123.45}]", enc);
+}
+
+test "encodeJsonString escapes properly" {
+    const allocator = std.testing.allocator;
+
+    const s1 = try encodeJsonString(allocator, "simple");
+    defer allocator.free(s1);
+    try std.testing.expectEqualStrings("\"simple\"", s1);
+
+    const s2 = try encodeJsonString(allocator, "quote \" and \\ and newline \n");
+    defer allocator.free(s2);
+    try std.testing.expectEqualStrings("\"quote \\\" and \\\\ and newline \\n\"", s2);
+}
+
+test "parseMediaState from room_data" {
+    const allocator = std.testing.allocator;
+
+    const playing_json = "{\"roomId\":\"test\",\"mediaState\":{\"revision\":1,\"playbackState\":\"playing\",\"currentTime\":42.5}}";
+    const playing_ms = parseMediaState(playing_json, allocator);
+    try std.testing.expect(playing_ms != null);
+    try std.testing.expectEqual(42.5, playing_ms.?.current_time);
+    try std.testing.expectEqual(MediaStateSnapshot.PlaybackState.playing, playing_ms.?.playback_state);
+
+    const paused_json = "{\"roomId\":\"test\",\"mediaState\":{\"revision\":2,\"playbackState\":\"paused\",\"currentTime\":100}}";
+    const paused_ms = parseMediaState(paused_json, allocator);
+    try std.testing.expect(paused_ms != null);
+    try std.testing.expectEqual(100.0, paused_ms.?.current_time);
+    try std.testing.expectEqual(MediaStateSnapshot.PlaybackState.paused, paused_ms.?.playback_state);
+
+    const null_json = "{\"roomId\":\"test\",\"mediaState\":null}";
+    try std.testing.expect(parseMediaState(null_json, allocator) == null);
+
+    const missing_json = "{\"roomId\":\"test\"}";
+    try std.testing.expect(parseMediaState(missing_json, allocator) == null);
 }
