@@ -41,34 +41,134 @@ const LoopGuard = struct {
 const OVERLAY_ID_MENU: u32 = 1;
 const OVERLAY_ID_HUD: u32 = 2;
 
-const MenuItem = enum {
-    force_sync,
+const MenuActionKind = enum {
+    join_favorite,
     toggle_sync,
+    force_sync,
     catch_up,
+    fav_add,
+    fav_remove,
     join_prompt,
     leave_room,
     close,
+};
 
-    pub fn label(self: MenuItem) []const u8 {
-        return switch (self) {
-            .force_sync => "Force Sync Room Position",
-            .toggle_sync => "Toggle Sync Mute",
-            .catch_up => "Catch Up to Room",
-            .join_prompt => "Join / Switch Room…",
-            .leave_room => "Leave Room & Standby",
-            .close => "Close Menu",
-        };
+const MenuAction = struct {
+    kind: MenuActionKind,
+    fav_idx: usize = 0,
+    label: [64]u8 = undefined,
+    label_len: usize = 0,
+
+    pub fn text(self: *const MenuAction) []const u8 {
+        return self.label[0..self.label_len];
     }
 };
 
-const MENU_ITEMS = [_]MenuItem{
-    .force_sync,
-    .toggle_sync,
-    .catch_up,
-    .join_prompt,
-    .leave_room,
-    .close,
-};
+fn buildMenuActions(
+    actions: []MenuAction,
+    session: *protocol.Session,
+    favorites: []const config_mod.FavoriteRoom,
+) usize {
+    var count: usize = 0;
+    var r_buf: [64]u8 = undefined;
+    const room_name = session.getRoomName(&r_buf);
+    const in_standby = (room_name == null);
+
+    if (!in_standby) {
+        // Active room actions
+        actions[count] = .{ .kind = .force_sync };
+        const l1 = "Force Sync Room Position";
+        @memcpy(actions[count].label[0..l1.len], l1);
+        actions[count].label_len = l1.len;
+        count += 1;
+
+        actions[count] = .{ .kind = .toggle_sync };
+        const l2 = "Toggle Sync Mute";
+        @memcpy(actions[count].label[0..l2.len], l2);
+        actions[count].label_len = l2.len;
+        count += 1;
+
+        actions[count] = .{ .kind = .catch_up };
+        const l3 = "Catch Up to Room";
+        @memcpy(actions[count].label[0..l3.len], l3);
+        actions[count].label_len = l3.len;
+        count += 1;
+
+        var is_fav = false;
+        for (favorites) |fav| {
+            if (std.mem.eql(u8, fav.room, room_name.?)) {
+                is_fav = true;
+                break;
+            }
+        }
+        if (is_fav) {
+            actions[count] = .{ .kind = .fav_remove };
+            const l_rem = "★ Remove Room from Favorites";
+            @memcpy(actions[count].label[0..l_rem.len], l_rem);
+            actions[count].label_len = l_rem.len;
+            count += 1;
+        } else {
+            actions[count] = .{ .kind = .fav_add };
+            const l_add = "★ Save Room to Favorites";
+            @memcpy(actions[count].label[0..l_add.len], l_add);
+            actions[count].label_len = l_add.len;
+            count += 1;
+        }
+
+        var switches: usize = 0;
+        for (favorites, 0..) |fav, i| {
+            if (switches >= 3) break;
+            if (!std.mem.eql(u8, fav.room, room_name.?)) {
+                actions[count] = .{ .kind = .join_favorite, .fav_idx = i };
+                const sw_txt = std.fmt.bufPrint(&actions[count].label, "Switch to: {s}", .{fav.label}) catch fav.label;
+                actions[count].label_len = sw_txt.len;
+                count += 1;
+                switches += 1;
+            }
+        }
+
+        actions[count] = .{ .kind = .join_prompt };
+        const l4 = "Join / Switch Other Room…";
+        @memcpy(actions[count].label[0..l4.len], l4);
+        actions[count].label_len = l4.len;
+        count += 1;
+
+        actions[count] = .{ .kind = .leave_room };
+        const l5 = "Leave Room & Standby";
+        @memcpy(actions[count].label[0..l5.len], l5);
+        actions[count].label_len = l5.len;
+        count += 1;
+    } else {
+        // Standby mode actions
+        for (favorites, 0..) |fav, i| {
+            if (count >= 5) break;
+            actions[count] = .{ .kind = .join_favorite, .fav_idx = i };
+            const fav_txt = std.fmt.bufPrint(&actions[count].label, "★ Join: {s}", .{fav.label}) catch fav.label;
+            actions[count].label_len = fav_txt.len;
+            count += 1;
+        }
+
+        actions[count] = .{ .kind = .join_prompt };
+        const l_jp = "Join Other Room…";
+        @memcpy(actions[count].label[0..l_jp.len], l_jp);
+        actions[count].label_len = l_jp.len;
+        count += 1;
+
+        actions[count] = .{ .kind = .toggle_sync };
+        const l_ts = "Toggle Sync Mute";
+        @memcpy(actions[count].label[0..l_ts.len], l_ts);
+        actions[count].label_len = l_ts.len;
+        count += 1;
+    }
+
+    actions[count] = .{ .kind = .close };
+    const l_cl = "Close Menu";
+    @memcpy(actions[count].label[0..l_cl.len], l_cl);
+    actions[count].label_len = l_cl.len;
+    count += 1;
+
+    return count;
+}
 
 const MenuState = struct {
     is_open: bool = false,
@@ -148,7 +248,8 @@ fn main_impl(handle: mpv.Handle) !void {
         "ctrl+shift+r script-message koalasync-resync\n" ++
         "ctrl+shift+i script-message koalasync-status\n" ++
         "tab script-message koalasync-status\n" ++
-        "ctrl+shift+l script-message koalasync-leave";
+        "ctrl+shift+l script-message koalasync-leave\n" ++
+        "ctrl+shift+f script-message koalasync-fav-toggle";
 
     mpv.defineSection(handle, "koalasync", default_bindings, "default");
     mpv.enableSection(handle, "koalasync", "default");
@@ -166,19 +267,38 @@ fn main_impl(handle: mpv.Handle) !void {
 
     mpv.defineSection(handle, "koalasync-menu", menu_nav_bindings, "force");
 
+    // ── Favorites state ─────────────────────────────────────────
+    var favorites: std.ArrayList(config_mod.FavoriteRoom) = .empty;
+    defer {
+        for (favorites.items) |fav| {
+            allocator.free(fav.room);
+            allocator.free(fav.password);
+            allocator.free(fav.label);
+        }
+        favorites.deinit(allocator);
+    }
+    for (cfg.favorites) |fav| {
+        try favorites.append(allocator, try fav.clone(allocator));
+    }
+
     // ── Initial user feedback ───────────────────────────────────
-    if (cfg.room) |r| {
-        mpv.osdMessage(handle, allocator, "KoalaSync: connecting to room \"{s}\"…", .{r}, 3.0);
+    const should_autojoin = cfg.autojoin and cfg.room != null;
+    if (should_autojoin) {
+        mpv.osdMessage(handle, allocator, "KoalaSync: connecting to room \"{s}\"…", .{cfg.room.?}, 3.0);
     } else {
-        mpv.osdMessage(handle, allocator, "KoalaSync: ready • Press Ctrl+K for menu or Ctrl+Shift+J to join", .{}, 4.0);
+        if (favorites.items.len > 0) {
+            mpv.osdMessage(handle, allocator, "KoalaSync: ready • Press Ctrl+K for menu (★ {d} favorites)", .{favorites.items.len}, 4.0);
+        } else {
+            mpv.osdMessage(handle, allocator, "KoalaSync: ready • Press Ctrl+K for menu or Ctrl+Shift+J to join", .{}, 4.0);
+        }
     }
 
     // ── Set up protocol session ─────────────────────────────────
     var session = try protocol.Session.init(
         allocator,
         cfg.server,
-        cfg.room,
-        cfg.password,
+        if (should_autojoin) cfg.room else null,
+        if (should_autojoin) cfg.password else "",
         cfg.peer_id,
         cfg.username,
     );
@@ -244,9 +364,102 @@ fn main_impl(handle: mpv.Handle) !void {
                             mpv.osdMessage(handle, allocator, "KoalaSync: connecting to room \"{s}\"…", .{target_room}, 3.0);
                         }
                     } else if (std.mem.eql(u8, cmd_name, "koalasync-join-prompt")) {
-                        mpv.commandString(handle, "script-message-to console type \"script-message koalasync-join \"") catch {
+                        var prompt_buf: [128]u8 = undefined;
+                        const default_prompt: [*:0]const u8 = "script-message-to console type \"script-message koalasync-join \"";
+                        const prompt_cmd: [*:0]const u8 = if (favorites.items.len > 0)
+                            if (std.fmt.bufPrintZ(&prompt_buf, "script-message-to console type \"script-message koalasync-join {s} \"", .{favorites.items[0].room})) |z|
+                                z.ptr
+                            else |_|
+                                default_prompt
+                        else
+                            default_prompt;
+                        mpv.commandString(handle, prompt_cmd) catch {
                             mpv.osdMessage(handle, allocator, "KoalaSync: run :script-message koalasync-join <room> [pass]", .{}, 4.0);
                         };
+                    } else if (std.mem.eql(u8, cmd_name, "koalasync-join-fav")) {
+                        if (msg.num_args > 1 and args[1] != null) {
+                            const arg_str = std.mem.sliceTo(args[1].?, 0);
+                            const fav_num = std.fmt.parseInt(usize, arg_str, 10) catch 0;
+                            if (fav_num >= 1 and fav_num <= favorites.items.len) {
+                                const fav = favorites.items[fav_num - 1];
+                                const pass: ?[]const u8 = if (fav.password.len > 0) fav.password else null;
+                                session.requestJoin(fav.room, pass);
+                                mpv.osdMessage(handle, allocator, "KoalaSync: connecting to ★ \"{s}\"…", .{fav.label}, 3.0);
+                            }
+                        }
+                    } else if (std.mem.eql(u8, cmd_name, "koalasync-fav-add")) {
+                        var r_buf: [64]u8 = undefined;
+                        if (session.getRoomName(&r_buf)) |r_name| {
+                            var exists = false;
+                            for (favorites.items) |fav| {
+                                if (std.mem.eql(u8, fav.room, r_name)) {
+                                    exists = true;
+                                    break;
+                                }
+                            }
+                            if (!exists) {
+                                const new_fav = config_mod.FavoriteRoom{
+                                    .room = try allocator.dupe(u8, r_name),
+                                    .password = try allocator.dupe(u8, session.password),
+                                    .label = try allocator.dupe(u8, r_name),
+                                };
+                                try favorites.append(allocator, new_fav);
+                                config_mod.saveFavorites(allocator, favorites.items);
+                                mpv.osdMessage(handle, allocator, "★ Added \"{s}\" to favorites ✓", .{r_name}, 2.5);
+                                if (menu_state.is_open) {
+                                    if (menu_state.is_uosc) renderUoscMenu(handle, &session, favorites.items, true) else renderMenu(handle, allocator, &session, favorites.items, &menu_state);
+                                }
+                            }
+                        }
+                    } else if (std.mem.eql(u8, cmd_name, "koalasync-fav-remove")) {
+                        var r_buf: [64]u8 = undefined;
+                        if (session.getRoomName(&r_buf)) |r_name| {
+                            for (favorites.items, 0..) |fav, i| {
+                                if (std.mem.eql(u8, fav.room, r_name)) {
+                                    allocator.free(fav.room);
+                                    allocator.free(fav.password);
+                                    allocator.free(fav.label);
+                                    _ = favorites.orderedRemove(i);
+                                    config_mod.saveFavorites(allocator, favorites.items);
+                                    mpv.osdMessage(handle, allocator, "Removed \"{s}\" from favorites", .{r_name}, 2.5);
+                                    if (menu_state.is_open) {
+                                        if (menu_state.is_uosc) renderUoscMenu(handle, &session, favorites.items, true) else renderMenu(handle, allocator, &session, favorites.items, &menu_state);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    } else if (std.mem.eql(u8, cmd_name, "koalasync-fav-toggle")) {
+                        var r_buf: [64]u8 = undefined;
+                        if (session.getRoomName(&r_buf)) |r_name| {
+                            var found_idx: ?usize = null;
+                            for (favorites.items, 0..) |fav, i| {
+                                if (std.mem.eql(u8, fav.room, r_name)) {
+                                    found_idx = i;
+                                    break;
+                                }
+                            }
+                            if (found_idx) |i| {
+                                allocator.free(favorites.items[i].room);
+                                allocator.free(favorites.items[i].password);
+                                allocator.free(favorites.items[i].label);
+                                _ = favorites.orderedRemove(i);
+                                config_mod.saveFavorites(allocator, favorites.items);
+                                mpv.osdMessage(handle, allocator, "Removed \"{s}\" from favorites", .{r_name}, 2.5);
+                            } else {
+                                const new_fav = config_mod.FavoriteRoom{
+                                    .room = try allocator.dupe(u8, r_name),
+                                    .password = try allocator.dupe(u8, session.password),
+                                    .label = try allocator.dupe(u8, r_name),
+                                };
+                                try favorites.append(allocator, new_fav);
+                                config_mod.saveFavorites(allocator, favorites.items);
+                                mpv.osdMessage(handle, allocator, "★ Added \"{s}\" to favorites ✓", .{r_name}, 2.5);
+                            }
+                            if (menu_state.is_open) {
+                                if (menu_state.is_uosc) renderUoscMenu(handle, &session, favorites.items, true) else renderMenu(handle, allocator, &session, favorites.items, &menu_state);
+                            }
+                        }
                     } else if (std.mem.eql(u8, cmd_name, "koalasync-leave")) {
                         session.requestLeave();
                     } else if (std.mem.eql(u8, cmd_name, "koalasync-force-sync")) {
@@ -257,9 +470,9 @@ fn main_impl(handle: mpv.Handle) !void {
                         const muted = session.toggleSyncMute();
                         if (menu_state.is_open) {
                             if (menu_state.is_uosc) {
-                                renderUoscMenu(handle, &session, true);
+                                renderUoscMenu(handle, &session, favorites.items, true);
                             } else {
-                                renderMenu(handle, allocator, &session, &menu_state);
+                                renderMenu(handle, allocator, &session, favorites.items, &menu_state);
                             }
                         }
                         if (muted) {
@@ -289,15 +502,17 @@ fn main_impl(handle: mpv.Handle) !void {
                     } else if (std.mem.eql(u8, cmd_name, "uosc-version")) {
                         has_uosc = true;
                     } else if (std.mem.eql(u8, cmd_name, "koalasync-menu")) {
-                        toggleMenu(handle, allocator, &session, &menu_state, has_uosc);
+                        toggleMenu(handle, allocator, &session, favorites.items, &menu_state, has_uosc);
                     } else if (std.mem.eql(u8, cmd_name, "koalasync-menu-nav")) {
                         if (msg.num_args > 1 and args[1] != null) {
                             const dir = std.mem.sliceTo(args[1].?, 0);
-                            menuNav(&menu_state, dir);
-                            renderMenu(handle, allocator, &session, &menu_state);
+                            var actions: [16]MenuAction = undefined;
+                            const action_count = buildMenuActions(&actions, &session, favorites.items);
+                            menuNav(&menu_state, dir, action_count);
+                            renderMenu(handle, allocator, &session, favorites.items, &menu_state);
                         }
                     } else if (std.mem.eql(u8, cmd_name, "koalasync-menu-select")) {
-                        menuSelect(handle, allocator, &session, &menu_state, &guard);
+                        menuSelect(handle, allocator, &session, &favorites, &menu_state, &guard);
                     } else if (std.mem.eql(u8, cmd_name, "koalasync-menu-close")) {
                         closeMenu(handle, &menu_state);
                     } else if (std.mem.eql(u8, cmd_name, "koalasync-menu-closed")) {
@@ -436,9 +651,9 @@ fn main_impl(handle: mpv.Handle) !void {
                     mpv.osdMessage(handle, allocator, "• {s} joined the room", .{cmd.text()}, 3.0);
                     if (menu_state.is_open) {
                         if (menu_state.is_uosc) {
-                            renderUoscMenu(handle, &session, true);
+                            renderUoscMenu(handle, &session, favorites.items, true);
                         } else {
-                            renderMenu(handle, allocator, &session, &menu_state);
+                            renderMenu(handle, allocator, &session, favorites.items, &menu_state);
                         }
                     }
                 },
@@ -446,9 +661,9 @@ fn main_impl(handle: mpv.Handle) !void {
                     mpv.osdMessage(handle, allocator, "• {s} left the room", .{cmd.text()}, 3.0);
                     if (menu_state.is_open) {
                         if (menu_state.is_uosc) {
-                            renderUoscMenu(handle, &session, true);
+                            renderUoscMenu(handle, &session, favorites.items, true);
                         } else {
-                            renderMenu(handle, allocator, &session, &menu_state);
+                            renderMenu(handle, allocator, &session, favorites.items, &menu_state);
                         }
                     }
                 },
@@ -456,9 +671,9 @@ fn main_impl(handle: mpv.Handle) !void {
                     mpv.osdMessage(handle, allocator, "KoalaSync: left room • Disconnected", .{}, 3.0);
                     if (menu_state.is_open) {
                         if (menu_state.is_uosc) {
-                            renderUoscMenu(handle, &session, true);
+                            renderUoscMenu(handle, &session, favorites.items, true);
                         } else {
-                            renderMenu(handle, allocator, &session, &menu_state);
+                            renderMenu(handle, allocator, &session, favorites.items, &menu_state);
                         }
                     }
                 },
@@ -498,12 +713,12 @@ fn main_impl(handle: mpv.Handle) !void {
                     }
                 }
                 if (is_still_open) {
-                    renderUoscMenu(handle, &session, true);
+                    renderUoscMenu(handle, &session, favorites.items, true);
                 } else {
                     menu_state.is_open = false;
                 }
             } else {
-                renderMenu(handle, allocator, &session, &menu_state);
+                renderMenu(handle, allocator, &session, favorites.items, &menu_state);
             }
         }
 
@@ -521,7 +736,14 @@ fn main_impl(handle: mpv.Handle) !void {
 
 // ── UI Controller Functions ─────────────────────────────────────
 
-fn toggleMenu(handle: mpv.Handle, allocator: std.mem.Allocator, session: *protocol.Session, state: *MenuState, has_uosc: bool) void {
+fn toggleMenu(
+    handle: mpv.Handle,
+    allocator: std.mem.Allocator,
+    session: *protocol.Session,
+    favorites: []const config_mod.FavoriteRoom,
+    state: *MenuState,
+    has_uosc: bool,
+) void {
     if (state.is_open) {
         closeMenu(handle, state);
         return;
@@ -532,14 +754,15 @@ fn toggleMenu(handle: mpv.Handle, allocator: std.mem.Allocator, session: *protoc
     // Check if uosc is running
     if (isUoscPresent(handle, allocator, has_uosc)) {
         state.is_uosc = true;
-        renderUoscMenu(handle, session, false);
+        renderUoscMenu(handle, session, favorites, false);
         return;
     }
 
     // Fall back to built-in ASS menu
     state.is_uosc = false;
+    state.selected_index = 0;
     mpv.enableSection(handle, "koalasync-menu", "force");
-    renderMenu(handle, allocator, session, state);
+    renderMenu(handle, allocator, session, favorites, state);
 }
 
 fn closeMenu(handle: mpv.Handle, state: *MenuState) void {
@@ -554,16 +777,16 @@ fn closeMenu(handle: mpv.Handle, state: *MenuState) void {
     }
 }
 
-fn menuNav(state: *MenuState, dir: []const u8) void {
-    if (!state.is_open) return;
+fn menuNav(state: *MenuState, dir: []const u8, action_count: usize) void {
+    if (!state.is_open or action_count == 0) return;
     if (std.mem.eql(u8, dir, "up")) {
         if (state.selected_index == 0) {
-            state.selected_index = MENU_ITEMS.len - 1;
+            state.selected_index = action_count - 1;
         } else {
             state.selected_index -= 1;
         }
     } else if (std.mem.eql(u8, dir, "down")) {
-        state.selected_index = (state.selected_index + 1) % MENU_ITEMS.len;
+        state.selected_index = (state.selected_index + 1) % action_count;
     }
 }
 
@@ -571,12 +794,58 @@ fn menuSelect(
     handle: mpv.Handle,
     allocator: std.mem.Allocator,
     session: *protocol.Session,
+    favorites: *std.ArrayList(config_mod.FavoriteRoom),
     state: *MenuState,
     guard: *LoopGuard,
 ) void {
     if (!state.is_open) return;
 
-    switch (MENU_ITEMS[state.selected_index]) {
+    var actions: [16]MenuAction = undefined;
+    const action_count = buildMenuActions(&actions, session, favorites.items);
+    if (state.selected_index >= action_count) state.selected_index = 0;
+
+    const action = actions[state.selected_index];
+    switch (action.kind) {
+        .join_favorite => {
+            closeMenu(handle, state);
+            if (action.fav_idx < favorites.items.len) {
+                const fav = favorites.items[action.fav_idx];
+                const pass: ?[]const u8 = if (fav.password.len > 0) fav.password else null;
+                session.requestJoin(fav.room, pass);
+                mpv.osdMessage(handle, allocator, "KoalaSync: connecting to room \"{s}\"…", .{fav.room}, 3.0);
+            }
+        },
+        .fav_add => {
+            var r_buf: [64]u8 = undefined;
+            if (session.getRoomName(&r_buf)) |r_name| {
+                const new_fav = config_mod.FavoriteRoom{
+                    .room = allocator.dupe(u8, r_name) catch return,
+                    .password = allocator.dupe(u8, session.password) catch "",
+                    .label = allocator.dupe(u8, r_name) catch "",
+                };
+                favorites.append(allocator, new_fav) catch {};
+                config_mod.saveFavorites(allocator, favorites.items);
+                mpv.osdMessage(handle, allocator, "★ Added \"{s}\" to favorites ✓", .{r_name}, 2.0);
+                renderMenu(handle, allocator, session, favorites.items, state);
+            }
+        },
+        .fav_remove => {
+            var r_buf: [64]u8 = undefined;
+            if (session.getRoomName(&r_buf)) |r_name| {
+                for (favorites.items, 0..) |fav, i| {
+                    if (std.mem.eql(u8, fav.room, r_name)) {
+                        allocator.free(fav.room);
+                        allocator.free(fav.password);
+                        allocator.free(fav.label);
+                        _ = favorites.orderedRemove(i);
+                        config_mod.saveFavorites(allocator, favorites.items);
+                        mpv.osdMessage(handle, allocator, "Removed \"{s}\" from favorites", .{r_name}, 2.0);
+                        renderMenu(handle, allocator, session, favorites.items, state);
+                        break;
+                    }
+                }
+            }
+        },
         .force_sync => {
             closeMenu(handle, state);
             const time = mpv.getPropertyDouble(handle, "time-pos") catch 0;
@@ -585,7 +854,7 @@ fn menuSelect(
         },
         .toggle_sync => {
             const muted = session.toggleSyncMute();
-            renderMenu(handle, allocator, session, state);
+            renderMenu(handle, allocator, session, favorites.items, state);
             if (muted) {
                 mpv.osdMessage(handle, allocator, "⏸ Sync Muted", .{}, 1.5);
             } else {
@@ -603,7 +872,16 @@ fn menuSelect(
         },
         .join_prompt => {
             closeMenu(handle, state);
-            mpv.commandString(handle, "script-message-to console type \"script-message koalasync-join \"") catch {
+            var prompt_buf: [128]u8 = undefined;
+            const default_prompt: [*:0]const u8 = "script-message-to console type \"script-message koalasync-join \"";
+            const prompt_cmd: [*:0]const u8 = if (favorites.items.len > 0)
+                if (std.fmt.bufPrintZ(&prompt_buf, "script-message-to console type \"script-message koalasync-join {s} \"", .{favorites.items[0].room})) |z|
+                    z.ptr
+                else |_|
+                    default_prompt
+            else
+                default_prompt;
+            mpv.commandString(handle, prompt_cmd) catch {
                 mpv.osdMessage(handle, allocator, "KoalaSync: run :script-message koalasync-join <room>", .{}, 3.0);
             };
         },
@@ -617,7 +895,13 @@ fn menuSelect(
     }
 }
 
-fn renderMenu(handle: mpv.Handle, allocator: std.mem.Allocator, session: *protocol.Session, state: *MenuState) void {
+fn renderMenu(
+    handle: mpv.Handle,
+    allocator: std.mem.Allocator,
+    session: *protocol.Session,
+    favorites: []const config_mod.FavoriteRoom,
+    state: *MenuState,
+) void {
     _ = allocator;
     if (!state.is_open) return;
 
@@ -629,6 +913,10 @@ fn renderMenu(handle: mpv.Handle, allocator: std.mem.Allocator, session: *protoc
     const ping = session.getServerPing();
     const is_muted = session.isSyncMuted();
     const sync_status_str = if (is_muted) "MUTED ⏸" else "ACTIVE ▶";
+
+    var actions: [16]MenuAction = undefined;
+    const action_count = buildMenuActions(&actions, session, favorites);
+    if (state.selected_index >= action_count) state.selected_index = 0;
 
     var buf: [4096]u8 = undefined;
     var pos: usize = 0;
@@ -644,12 +932,12 @@ fn renderMenu(handle: mpv.Handle, allocator: std.mem.Allocator, session: *protoc
     pos += header.len;
 
     // Menu options
-    for (MENU_ITEMS, 0..) |item, idx| {
+    for (actions[0..action_count], 0..) |*act, idx| {
         const selected = (idx == state.selected_index);
         const line = if (selected)
-            std.fmt.bufPrint(buf[pos..], "{{\\fs24\\c&H00D7FF&\\b1}}  ► [{d}] {s}{{\\b0\\c&HFFFFFF&}}\\N", .{ idx + 1, item.label() }) catch return
+            std.fmt.bufPrint(buf[pos..], "{{\\fs24\\c&H00D7FF&\\b1}}  ► [{d}] {s}{{\\b0\\c&HFFFFFF&}}\\N", .{ idx + 1, act.text() }) catch return
         else
-            std.fmt.bufPrint(buf[pos..], "{{\\fs24\\c&HCCCCCC&}}    [{d}] {s}\\N", .{ idx + 1, item.label() }) catch return;
+            std.fmt.bufPrint(buf[pos..], "{{\\fs24\\c&HCCCCCC&}}    [{d}] {s}\\N", .{ idx + 1, act.text() }) catch return;
         pos += line.len;
     }
 
@@ -777,34 +1065,156 @@ fn toggleHud(handle: mpv.Handle, allocator: std.mem.Allocator, session: *protoco
     hud.expires_at = time_util.milliTimestamp() + 4000;
 }
 
-fn renderUoscMenu(handle: mpv.Handle, session: *protocol.Session, is_update: bool) void {
+fn renderUoscMenu(handle: mpv.Handle, session: *protocol.Session, favorites: []const config_mod.FavoriteRoom, is_update: bool) void {
     var r_buf: [64]u8 = undefined;
-    const room_name = session.getRoomName(&r_buf) orelse "(none)";
+    const active_room = session.getRoomName(&r_buf);
+    const in_standby = (active_room == null);
 
     var peers_buf: [16]protocol.PeerInfo = undefined;
     const peer_count = session.getRosterSnapshot(&peers_buf);
     const is_muted = session.isSyncMuted();
     const sync_hint = if (is_muted) "Muted" else "Active";
 
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var pos: usize = 0;
+
+    var title_buf: [64]u8 = undefined;
+    const menu_title = if (in_standby)
+        "KoalaSync (Standby)"
+    else
+        std.fmt.bufPrint(&title_buf, "KoalaSync (Room: {s})", .{active_room.?}) catch "KoalaSync";
 
     const base = std.fmt.bufPrint(
         buf[pos..],
         "{{" ++
             "\"type\":\"koalasync\"," ++
-            "\"title\":\"KoalaSync (Room: {s})\"," ++
+            "\"title\":\"{s}\"," ++
             "\"on_close\":\"script-message koalasync-menu-closed\"," ++
-            "\"items\":[" ++
-            "{{\"title\":\"Force Sync Room Position\",\"icon\":\"sync\",\"value\":\"script-message koalasync-force-sync\"}}," ++
-            "{{\"title\":\"Toggle Sync Mute\",\"hint\":\"{s}\",\"icon\":\"tune\",\"value\":\"script-message koalasync-toggle-sync\",\"keep_open\":true}}," ++
-            "{{\"title\":\"Catch Up to Room\",\"icon\":\"fast_forward\",\"value\":\"script-message koalasync-resync\"}}," ++
-            "{{\"title\":\"Join / Switch Room…\",\"icon\":\"meeting_room\",\"value\":\"script-message koalasync-join-prompt\"}},",
-        .{ room_name, sync_hint },
+            "\"items\":[",
+        .{menu_title},
     ) catch return;
     pos += base.len;
 
-    if (peer_count > 0) {
+    var need_comma = false;
+
+    if (!in_standby) {
+        const p_actions = std.fmt.bufPrint(
+            buf[pos..],
+            "{{\"title\":\"Force Sync Room Position\",\"icon\":\"sync\",\"value\":\"script-message koalasync-force-sync\"}}," ++
+                "{{\"title\":\"Toggle Sync Mute\",\"hint\":\"{s}\",\"icon\":\"tune\",\"value\":\"script-message koalasync-toggle-sync\",\"keep_open\":true}}," ++
+                "{{\"title\":\"Catch Up to Room\",\"icon\":\"fast_forward\",\"value\":\"script-message koalasync-resync\"}}",
+            .{sync_hint},
+        ) catch return;
+        pos += p_actions.len;
+        need_comma = true;
+    }
+
+    // Favorite Rooms submenu
+    if (favorites.len > 0 or !in_standby) {
+        if (need_comma) {
+            buf[pos] = ',';
+            pos += 1;
+        }
+
+        var fav_hint_buf: [32]u8 = undefined;
+        const fav_hint = std.fmt.bufPrint(&fav_hint_buf, "{d} saved", .{favorites.len}) catch "";
+        const fav_head = std.fmt.bufPrint(
+            buf[pos..],
+            "{{\"id\":\"favorites\",\"title\":\"Favorite Rooms\",\"hint\":\"{s}\",\"icon\":\"bookmark\",\"items\":[",
+            .{fav_hint},
+        ) catch return;
+        pos += fav_head.len;
+
+        var sub_need_comma = false;
+        for (favorites) |fav| {
+            if (sub_need_comma) {
+                buf[pos] = ',';
+                pos += 1;
+            }
+            const is_cur = (!in_standby and std.mem.eql(u8, fav.room, active_room.?));
+            if (is_cur) {
+                const item = std.fmt.bufPrint(
+                    buf[pos..],
+                    "{{\"title\":\"{s}\",\"hint\":\"Current Room\",\"icon\":\"check\"}}",
+                    .{fav.label},
+                ) catch return;
+                pos += item.len;
+            } else {
+                const pass_param = if (fav.password.len > 0) fav.password else "";
+                const item = std.fmt.bufPrint(
+                    buf[pos..],
+                    "{{\"title\":\"{s}\",\"hint\":\"{s}\",\"icon\":\"login\",\"value\":\"script-message koalasync-join {s} {s}\"}}",
+                    .{ fav.label, fav.room, fav.room, pass_param },
+                ) catch return;
+                pos += item.len;
+            }
+            sub_need_comma = true;
+        }
+
+        if (!in_standby) {
+            if (sub_need_comma) {
+                buf[pos] = ',';
+                pos += 1;
+            }
+            var is_fav = false;
+            for (favorites) |fav| {
+                if (std.mem.eql(u8, fav.room, active_room.?)) {
+                    is_fav = true;
+                    break;
+                }
+            }
+            if (is_fav) {
+                const rem_item = std.fmt.bufPrint(
+                    buf[pos..],
+                    "{{\"title\":\"Remove from Favorites\",\"icon\":\"star_border\",\"value\":\"script-message koalasync-fav-remove\",\"keep_open\":true}}",
+                    .{},
+                ) catch return;
+                pos += rem_item.len;
+            } else {
+                const add_item = std.fmt.bufPrint(
+                    buf[pos..],
+                    "{{\"title\":\"Add Current Room to Favorites\",\"icon\":\"star\",\"value\":\"script-message koalasync-fav-add\",\"keep_open\":true}}",
+                    .{},
+                ) catch return;
+                pos += add_item.len;
+            }
+        }
+
+        const fav_tail = std.fmt.bufPrint(buf[pos..], "]}}", .{}) catch return;
+        pos += fav_tail.len;
+        need_comma = true;
+    }
+
+    // Join / Switch Room prompt
+    if (need_comma) {
+        buf[pos] = ',';
+        pos += 1;
+    }
+    const jp_item = std.fmt.bufPrint(
+        buf[pos..],
+        "{{\"title\":\"Join / Switch Room…\",\"icon\":\"meeting_room\",\"value\":\"script-message koalasync-join-prompt\"}}",
+        .{},
+    ) catch return;
+    pos += jp_item.len;
+    need_comma = true;
+
+    // Standby mute toggle
+    if (in_standby) {
+        if (need_comma) {
+            buf[pos] = ',';
+            pos += 1;
+        }
+        const sm_item = std.fmt.bufPrint(
+            buf[pos..],
+            "{{\"title\":\"Toggle Sync Mute\",\"hint\":\"{s}\",\"icon\":\"tune\",\"value\":\"script-message koalasync-toggle-sync\",\"keep_open\":true}}",
+            .{sync_hint},
+        ) catch return;
+        pos += sm_item.len;
+        need_comma = true;
+    }
+
+    // Peers section
+    if (!in_standby and peer_count > 0) {
         var all_in_sync = true;
         var max_diff: f64 = 0;
         if (peer_count > 1) {
@@ -823,6 +1233,11 @@ fn renderUoscMenu(handle: mpv.Handle, session: *protocol.Session, is_update: boo
             "In sync"
         else
             formatDiff(&h_diff_buf, max_diff);
+
+        if (need_comma) {
+            buf[pos] = ',';
+            pos += 1;
+        }
 
         const p_head = std.fmt.bufPrint(
             buf[pos..],
@@ -847,7 +1262,7 @@ fn renderUoscMenu(handle: mpv.Handle, session: *protocol.Session, is_update: boo
             pos += you_item.len;
         }
 
-        // Entries 1..N: Remote peers with relative diffs and click-to-sync
+        // Entries 1..N: Remote peers
         if (peer_count > 1) {
             for (peers_buf[1..peer_count], 1..) |p, i| {
                 const diff = p.time_pos - session.local_time;
@@ -856,27 +1271,27 @@ fn renderUoscMenu(handle: mpv.Handle, session: *protocol.Session, is_update: boo
                 var d_buf: [16]u8 = undefined;
                 const d_str = formatDiff(&d_buf, diff);
 
-                var title_buf: [64]u8 = undefined;
-                var hint_buf: [64]u8 = undefined;
+                var p_title_buf: [64]u8 = undefined;
+                var p_hint_buf: [64]u8 = undefined;
                 var icon_str: []const u8 = "person";
                 var title_slice: []const u8 = p.username();
                 var hint_slice: []const u8 = "";
 
                 if (p.is_paused) {
-                    title_slice = std.fmt.bufPrint(&title_buf, "{s} (Paused)", .{p.username()}) catch p.username();
-                    hint_slice = std.fmt.bufPrint(&hint_buf, "{s} • {d}ms", .{ t_str, p.ping_ms }) catch "";
+                    title_slice = std.fmt.bufPrint(&p_title_buf, "{s} (Paused)", .{p.username()}) catch p.username();
+                    hint_slice = std.fmt.bufPrint(&p_hint_buf, "{s} • {d}ms", .{ t_str, p.ping_ms }) catch "";
                     icon_str = "pause";
                 } else if (@abs(diff) < 1.0) {
                     title_slice = p.username();
-                    hint_slice = std.fmt.bufPrint(&hint_buf, "In sync • {d}ms", .{p.ping_ms}) catch "";
+                    hint_slice = std.fmt.bufPrint(&p_hint_buf, "In sync • {d}ms", .{p.ping_ms}) catch "";
                     icon_str = "play_arrow";
                 } else if (diff >= 1.0) {
-                    title_slice = std.fmt.bufPrint(&title_buf, "{s} ({s} ahead)", .{ p.username(), d_str }) catch p.username();
-                    hint_slice = std.fmt.bufPrint(&hint_buf, "Catch up • {d}ms", .{p.ping_ms}) catch "";
+                    title_slice = std.fmt.bufPrint(&p_title_buf, "{s} ({s} ahead)", .{ p.username(), d_str }) catch p.username();
+                    hint_slice = std.fmt.bufPrint(&p_hint_buf, "Catch up • {d}ms", .{p.ping_ms}) catch "";
                     icon_str = "fast_forward";
                 } else {
-                    title_slice = std.fmt.bufPrint(&title_buf, "{s} ({s} behind)", .{ p.username(), d_str }) catch p.username();
-                    hint_slice = std.fmt.bufPrint(&hint_buf, "Jump back • {d}ms", .{p.ping_ms}) catch "";
+                    title_slice = std.fmt.bufPrint(&p_title_buf, "{s} ({s} behind)", .{ p.username(), d_str }) catch p.username();
+                    hint_slice = std.fmt.bufPrint(&p_hint_buf, "Jump back • {d}ms", .{p.ping_ms}) catch "";
                     icon_str = "fast_rewind";
                 }
                 const comma = if (i + 1 < peer_count) "," else "";
@@ -889,12 +1304,26 @@ fn renderUoscMenu(handle: mpv.Handle, session: *protocol.Session, is_update: boo
             }
         }
 
-        const p_tail = std.fmt.bufPrint(buf[pos..], "]}},", .{}) catch return;
+        const p_tail = std.fmt.bufPrint(buf[pos..], "]}}", .{}) catch return;
         pos += p_tail.len;
+        need_comma = true;
     }
 
-    const leave = std.fmt.bufPrint(buf[pos..], "{{\"title\":\"Leave Room\",\"icon\":\"logout\",\"value\":\"script-message koalasync-leave\"}}]}}", .{}) catch return;
-    pos += leave.len;
+    if (!in_standby) {
+        if (need_comma) {
+            buf[pos] = ',';
+            pos += 1;
+        }
+        const leave_item = std.fmt.bufPrint(
+            buf[pos..],
+            "{{\"title\":\"Leave Room\",\"icon\":\"logout\",\"value\":\"script-message koalasync-leave\"}}",
+            .{},
+        ) catch return;
+        pos += leave_item.len;
+    }
+
+    const menu_end = std.fmt.bufPrint(buf[pos..], "]}}", .{}) catch return;
+    pos += menu_end.len;
 
     buf[pos] = 0;
     const z_json: [:0]const u8 = buf[0..pos :0];
