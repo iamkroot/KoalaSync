@@ -38,20 +38,28 @@ Create `~/.config/mpv/script-opts/koalasync.conf`:
 
 ```ini
 koalasync-server=wss://syncserver.koalastuff.net
-koalasync-room=movie-night
-koalasync-password=secret
 koalasync-username=alice
+
+# By default, mpv starts in Standby mode and will NOT join any room:
+koalasync-autojoin=no
+
+# Maintain favorite rooms using numbered keys (room1, room2, etc.):
+# Format: roomN=room[:password][=Display Name]
+room1=movie-night:secret=Movie Night
+room2=anime-club=Anime Club
+room3=watch-party
 ```
 
 ### 4. Use
 
 ```bash
-# Launch mpv with video — connects automatically if room configured:
+# Launch mpv with video — launches cleanly in Standby mode by default:
 mpv video.mkv
+# → Press Ctrl+K for on-screen menu with 1-click favorite rooms!
+# → Or press Ctrl+Shift+J to open the console join prompt!
 
-# Or launch in standby mode without room config and join anytime:
-mpv video.mkv
-# → Press Ctrl+K for on-screen menu, or Ctrl+Shift+J to type room name!
+# Autojoin a specific room from the command line:
+mpv --script-opts=koalasync-room=movie-night video.mkv
 ```
 
 ---
@@ -62,9 +70,11 @@ The plugin registers default keybindings via mpv's `define-section` so all contr
 
 | Action | Default Hotkey | Script Message | Description |
 |---|---|---|---|
-| **Toggle Menu** | `Ctrl+k` or `c` | `script-message koalasync-menu` | Interactive in-player menu (auto-routes to `uosc` if installed, else ASS overlay) |
-| **Join Prompt** | `Ctrl+Shift+j` | `script-message koalasync-join-prompt` | Opens mpv console prompt pre-filled to join a room |
+| **Toggle Menu** | `Ctrl+k` or `c` | `script-message koalasync-menu` | Interactive in-player menu with 1-click favorite rooms (auto-routes to `uosc` if installed, else ASS overlay) |
+| **Join Prompt** | `Ctrl+Shift+j` | `script-message koalasync-join-prompt` | Opens mpv console prompt pre-filled with your favorite room |
 | **Join Room** | — | `script-message koalasync-join <room> [pass]` | Joins a specific room directly |
+| **Join Favorite** | — | `script-message koalasync-join-fav <1..N>` | Instantly joins favorite room #1, #2, etc. (bindable in `input.conf`) |
+| **Toggle Favorite** | `Ctrl+Shift+f` | `script-message koalasync-fav-toggle` | Adds or removes the currently active room from your favorites |
 | **Force Sync** | `Ctrl+Shift+s` or `Alt+s` | `script-message koalasync-force-sync` | Initiates room-wide resync to your current timestamp |
 | **Toggle Sync** | `Ctrl+Shift+t` | `script-message koalasync-toggle-sync` | Mutes/unmutes local sync (decouple playback without leaving) |
 | **Catch Up** | `Ctrl+Shift+r` | `script-message koalasync-resync` | Snaps local player to latest known room timestamp |
@@ -75,11 +85,11 @@ The plugin registers default keybindings via mpv's `define-section` so all contr
 When the built-in ASS menu is open (`Ctrl+K` / `c`):
 - `↑` / `k` — Move cursor up
 - `↓` / `j` — Move cursor down
-- `Enter` — Select option
+- `Enter` — Select option (e.g. join favorite room, switch room, or toggle favorite)
 - `Esc` / `Ctrl+K` — Close menu
 
 ### `uosc` Integration
-If [`uosc`](https://github.com/tomasklaen/uosc) is installed in your mpv setup, pressing `Ctrl+K` will automatically open a native `uosc` menu with icons, hints, mouse clickability, and peer submenus. If `uosc` is not present, it seamlessly falls back to the built-in ASS overlay.
+If [`uosc`](https://github.com/tomasklaen/uosc) is installed in your mpv setup, pressing `Ctrl+K` will automatically open a native `uosc` menu with icons, hints, mouse clickability, peer submenus, and a dedicated **Favorite Rooms** submenu for 1-click joining and switching. If `uosc` is not present, it seamlessly falls back to the built-in ASS overlay.
 
 ---
 
@@ -173,6 +183,7 @@ This preserves the repository's **single source of truth** principle. Run this a
 | Sync Mute / local playback decoupling | ✅ |
 | Out-of-the-box keybindings via define-section | ✅ |
 | mpv console prompt fallback | ✅ |
+| Favorite rooms (numbered) & in-player switching | ✅ |
 
 ### Planned
 

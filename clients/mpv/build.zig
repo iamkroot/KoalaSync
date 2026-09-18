@@ -46,6 +46,34 @@ pub fn build(b: *std.Build) void {
         .root_module = test_mod,
     });
     const run_tests = b.addRunArtifact(unit_tests);
+
+    const config_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/config.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    config_test_mod.addIncludePath(b.path("include"));
+    const config_tests = b.addTest(.{
+        .root_module = config_test_mod,
+    });
+    const run_config_tests = b.addRunArtifact(config_tests);
+
+    const protocol_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/protocol.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    protocol_test_mod.linkSystemLibrary("ssl", .{});
+    protocol_test_mod.linkSystemLibrary("crypto", .{});
+    const protocol_tests = b.addTest(.{
+        .root_module = protocol_test_mod,
+    });
+    const run_protocol_tests = b.addRunArtifact(protocol_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_config_tests.step);
+    test_step.dependOn(&run_protocol_tests.step);
 }
