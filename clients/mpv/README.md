@@ -46,15 +46,40 @@ koalasync-username=alice
 ### 4. Use
 
 ```bash
+# Launch mpv with video — connects automatically if room configured:
 mpv video.mkv
-# → OSD: "KoalaSync: joined room "movie-night" ✓"
+
+# Or launch in standby mode without room config and join anytime:
+mpv video.mkv
+# → Press Ctrl+K for on-screen menu, or Ctrl+Shift+J to type room name!
 ```
 
-Or pass options via CLI:
+---
 
-```bash
-mpv --script-opts=koalasync-room=test,koalasync-username=bob video.mkv
-```
+## User Controls & Keybindings
+
+The plugin registers default keybindings via mpv's `define-section` so all controls work out of the box (without requiring edits to `input.conf`), while still allowing custom rebinding:
+
+| Action | Default Hotkey | Script Message | Description |
+|---|---|---|---|
+| **Toggle Menu** | `Ctrl+k` or `c` | `script-message koalasync-menu` | Interactive in-player menu (auto-routes to `uosc` if installed, else ASS overlay) |
+| **Join Prompt** | `Ctrl+Shift+j` | `script-message koalasync-join-prompt` | Opens mpv console prompt pre-filled to join a room |
+| **Join Room** | — | `script-message koalasync-join <room> [pass]` | Joins a specific room directly |
+| **Force Sync** | `Ctrl+Shift+s` or `Alt+s` | `script-message koalasync-force-sync` | Initiates room-wide resync to your current timestamp |
+| **Toggle Sync** | `Ctrl+Shift+t` | `script-message koalasync-toggle-sync` | Mutes/unmutes local sync (decouple playback without leaving) |
+| **Catch Up** | `Ctrl+Shift+r` | `script-message koalasync-resync` | Snaps local player to latest known room timestamp |
+| **Peer HUD** | `Tab` or `Ctrl+Shift+i` | `script-message koalasync-status` | Displays live peer roster overlay card (ping, position, state) |
+| **Leave Room** | `Ctrl+Shift+l` | `script-message koalasync-leave` | Cleanly leaves room and returns to standby mode |
+
+### Interactive Menu Navigation
+When the built-in ASS menu is open (`Ctrl+K` / `c`):
+- `↑` / `k` — Move cursor up
+- `↓` / `j` — Move cursor down
+- `Enter` — Select option
+- `Esc` / `Ctrl+K` — Close menu
+
+### `uosc` Integration
+If [`uosc`](https://github.com/tomasklaen/uosc) is installed in your mpv setup, pressing `Ctrl+K` will automatically open a native `uosc` menu with icons, hints, mouse clickability, and peer submenus. If `uosc` is not present, it seamlessly falls back to the built-in ASS overlay.
 
 ---
 
@@ -142,6 +167,12 @@ This preserves the repository's **single source of truth** principle. Run this a
 | Config via script-opts & conf file | ✅ |
 | Cross-platform builds | ✅ |
 | Force sync (prepare & execute) | ✅ |
+| Standby mode & dynamic room joining | ✅ |
+| Interactive ASS Menu & Peer HUD | ✅ |
+| `uosc` menu bridge integration | ✅ |
+| Sync Mute / local playback decoupling | ✅ |
+| Out-of-the-box keybindings via define-section | ✅ |
+| mpv console prompt fallback | ✅ |
 
 ### Planned
 

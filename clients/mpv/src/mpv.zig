@@ -12,6 +12,7 @@ pub const Event = c.mpv_event;
 pub const EventId = c.mpv_event_id;
 pub const Format = c.mpv_format;
 pub const EventProperty = c.mpv_event_property;
+pub const EventClientMessage = c.mpv_event_client_message;
 
 // ── Event loop ──────────────────────────────────────────────────
 
@@ -79,12 +80,16 @@ pub fn setPropertyFlag(handle: Handle, name: [*:0]const u8, value: bool) !void {
 
 // ── Commands ────────────────────────────────────────────
 
+pub fn command(handle: Handle, args: anytype) c_int {
+    return c.mpv_command(handle, @ptrCast(@constCast(&args)));
+}
+
 pub fn commandString(handle: Handle, cmd: [*:0]const u8) !void {
     const rc = c.mpv_command_string(handle, cmd);
     if (rc < 0) return error.MpvError;
 }
 
-// ── OSD ─────────────────────────────────────────────────
+// ── OSD & Overlays ──────────────────────────────────────
 
 /// Show a transient OSD message for `duration` seconds.
 pub fn osdMessage(handle: Handle, allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype, duration: f64) void {
@@ -93,6 +98,39 @@ pub fn osdMessage(handle: Handle, allocator: std.mem.Allocator, comptime fmt: []
     const dur_str = std.fmt.allocPrintSentinel(allocator, "{d:.0}", .{duration * 1000}, 0) catch return;
     defer allocator.free(dur_str);
     var cmd = [_:null]?[*:0]const u8{ "show-text", text.ptr, dur_str.ptr, null };
+    _ = c.mpv_command(handle, @ptrCast(@constCast(&cmd)));
+}
+
+/// Render an ASS overlay with given numeric ID (e.g. 1 for menu, 2 for HUD).
+pub fn showOsdOverlay(handle: Handle, id: u32, ass_text: [*:0]const u8) void {
+    var id_buf: [16]u8 = undefined;
+    const id_str = std.fmt.bufPrintZ(&id_buf, "{d}", .{id}) catch return;
+    var cmd = [_:null]?[*:0]const u8{ "osd-overlay", id_str.ptr, "ass-events", ass_text, null };
+    _ = c.mpv_command(handle, @ptrCast(@constCast(&cmd)));
+}
+
+/// Remove an ASS overlay by ID.
+pub fn clearOsdOverlay(handle: Handle, id: u32) void {
+    var id_buf: [16]u8 = undefined;
+    const id_str = std.fmt.bufPrintZ(&id_buf, "{d}", .{id}) catch return;
+    var cmd = [_:null]?[*:0]const u8{ "osd-overlay", id_str.ptr, "none", "", null };
+    _ = c.mpv_command(handle, @ptrCast(@constCast(&cmd)));
+}
+
+// ── Key Section Management ──────────────────────────────
+
+pub fn defineSection(handle: Handle, name: [*:0]const u8, contents: [*:0]const u8, flags: [*:0]const u8) void {
+    var cmd = [_:null]?[*:0]const u8{ "define-section", name, contents, flags, null };
+    _ = c.mpv_command(handle, @ptrCast(@constCast(&cmd)));
+}
+
+pub fn enableSection(handle: Handle, name: [*:0]const u8, flags: [*:0]const u8) void {
+    var cmd = [_:null]?[*:0]const u8{ "enable-section", name, flags, null };
+    _ = c.mpv_command(handle, @ptrCast(@constCast(&cmd)));
+}
+
+pub fn disableSection(handle: Handle, name: [*:0]const u8) void {
+    var cmd = [_:null]?[*:0]const u8{ "disable-section", name, null };
     _ = c.mpv_command(handle, @ptrCast(@constCast(&cmd)));
 }
 

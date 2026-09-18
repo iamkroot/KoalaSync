@@ -17,7 +17,7 @@ extern fn fclose(stream: *anyopaque) c_int;
 
 pub const Config = struct {
     server: []const u8,
-    room: []const u8,
+    room: ?[]const u8,
     password: []const u8,
     username: []const u8,
     peer_id: []const u8,
@@ -26,7 +26,7 @@ pub const Config = struct {
 
     pub fn deinit(self: *Config) void {
         self.allocator.free(self.server);
-        self.allocator.free(self.room);
+        if (self.room) |r| self.allocator.free(r);
         self.allocator.free(self.password);
         self.allocator.free(self.username);
         self.allocator.free(self.peer_id);
@@ -90,8 +90,7 @@ pub fn load(handle: mpv.Handle, allocator: std.mem.Allocator) !Config {
     const final_server = server_val orelse try allocator.dupe(u8, K.official_server_url);
     errdefer allocator.free(final_server);
 
-    const final_room = room_val orelse return error.NoRoomConfigured;
-    errdefer allocator.free(final_room);
+    const final_room = room_val;
 
     const final_password = password_val orelse try allocator.dupe(u8, "");
     errdefer allocator.free(final_password);
@@ -99,8 +98,8 @@ pub fn load(handle: mpv.Handle, allocator: std.mem.Allocator) !Config {
     const final_username = username_val orelse try allocator.dupe(u8, "mpv-user");
     errdefer allocator.free(final_username);
 
-    // Generate a short random peer ID
-    var id_buf: [8]u8 = undefined;
+    // Generate a short random peer ID (<= 16 chars for relay compatibility)
+    var id_buf: [6]u8 = undefined;
     var prng = std.Random.DefaultPrng.init(@bitCast(time.milliTimestamp()));
     prng.random().bytes(&id_buf);
     const peer_id = try std.fmt.allocPrint(allocator, "mpv-{s}", .{std.fmt.bytesToHex(id_buf, .lower)});
