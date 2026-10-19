@@ -58,8 +58,9 @@ mpv video.mkv
 # → Press Ctrl+K for on-screen menu with 1-click favorite rooms!
 # → Or press Ctrl+Shift+J to open the console join prompt!
 
-# Autojoin a specific room from the command line:
+# Autojoin a specific room or invite link from the command line:
 mpv --script-opts=koalasync-room=movie-night video.mkv
+# Or launch and press Ctrl+V to join directly from an invite link in your clipboard!
 ```
 
 ---
@@ -71,8 +72,9 @@ The plugin registers default keybindings via mpv's `define-section` so all contr
 | Action | Default Hotkey | Script Message | Description |
 |---|---|---|---|
 | **Toggle Menu** | `Ctrl+k` or `c` | `script-message koalasync-menu` | Interactive in-player menu with 1-click favorite rooms (auto-routes to `uosc` if installed, else ASS overlay) |
+| **Paste Invite** | `Ctrl+v` | `script-message koalasync-paste` | Joins room directly from invite link in clipboard (v3.3.1 parity) |
 | **Join Prompt** | `Ctrl+Shift+j` | `script-message koalasync-join-prompt` | Opens mpv console prompt pre-filled with your favorite room |
-| **Join Room** | — | `script-message koalasync-join <room> [pass]` | Joins a specific room directly |
+| **Join Room** | — | `script-message koalasync-join <room\|link> [pass]` | Joins a room directly (accepts room names or `#j2:`/`#join:` invite links) |
 | **Join Favorite** | — | `script-message koalasync-join-fav <1..N>` | Instantly joins favorite room #1, #2, etc. (bindable in `input.conf`) |
 | **Toggle Favorite** | `Ctrl+Shift+f` | `script-message koalasync-fav-toggle` | Adds or removes the currently active room from your favorites |
 | **Force Sync** | `Ctrl+Shift+s` or `Alt+s` | `script-message koalasync-force-sync` | Initiates room-wide resync to your current timestamp |
@@ -184,6 +186,8 @@ This preserves the repository's **single source of truth** principle. Run this a
 | Out-of-the-box keybindings via define-section | ✅ |
 | mpv console prompt fallback | ✅ |
 | Favorite rooms (numbered) & in-player switching | ✅ |
+| Full invite link parsing (#j2, #join, arbitrary URLs) | ✅ |
+| Paste invite links & direct clipboard join (Ctrl+V) | ✅ |
 
 ### Planned
 

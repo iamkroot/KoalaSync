@@ -10,6 +10,7 @@ const std = @import("std");
 const mpv = @import("mpv.zig");
 const K = @import("constants.zig");
 const time = @import("time.zig");
+const invite = @import("invite.zig");
 
 extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
@@ -129,6 +130,35 @@ pub fn parseFavValue(allocator: std.mem.Allocator, val: []const u8) !struct { ro
     var label_part: ?[]const u8 = null;
     var pass_part: ?[]const u8 = null;
 
+    if (invite.parseInviteText(allocator, val)) |inv| {
+        defer inv.deinit(allocator);
+
+        if (std.mem.lastIndexOfScalar(u8, val, '=')) |last_eq| {
+            const candidate_label = trim(val[last_eq + 1 ..]);
+            if (!std.mem.eql(u8, candidate_label, inv.room_id) and
+                !std.mem.eql(u8, candidate_label, inv.password) and
+                !std.mem.eql(u8, candidate_label, inv.chat_key) and
+                candidate_label.len > 0)
+            {
+                label_part = candidate_label;
+            }
+        }
+
+        const room = try allocator.dupe(u8, inv.room_id);
+        errdefer allocator.free(room);
+
+        const pass = if (inv.password.len > 0) try allocator.dupe(u8, inv.password) else null;
+        errdefer if (pass) |p| allocator.free(p);
+
+        const label = if (label_part) |l| blk: {
+            const trimmed_l = trim(l);
+            if (trimmed_l.len > 0) break :blk try allocator.dupe(u8, trimmed_l);
+            break :blk null;
+        } else null;
+
+        return .{ .room = room, .pass = pass, .label = label };
+    }
+
     if (std.mem.indexOfScalar(u8, val, '=')) |eq_idx| {
         room_part = val[0..eq_idx];
         label_part = val[eq_idx + 1 ..];
@@ -197,8 +227,20 @@ fn processConfigContent(
                 server_val.* = try allocator.dupe(u8, val);
             },
             .room => {
-                if (room_val.*) |prev| allocator.free(prev);
-                room_val.* = try allocator.dupe(u8, val);
+                if (invite.parseInviteText(allocator, val)) |inv| {
+                    defer inv.deinit(allocator);
+                    if (room_val.*) |prev| allocator.free(prev);
+                    room_val.* = try allocator.dupe(u8, inv.room_id);
+                    if (password_val.* == null and inv.password.len > 0) {
+                        password_val.* = try allocator.dupe(u8, inv.password);
+                    }
+                    if (server_val.* == null and inv.server_url != null) {
+                        server_val.* = try allocator.dupe(u8, inv.server_url.?);
+                    }
+                } else {
+                    if (room_val.*) |prev| allocator.free(prev);
+                    room_val.* = try allocator.dupe(u8, val);
+                }
             },
             .password => {
                 if (password_val.*) |prev| allocator.free(prev);
@@ -279,8 +321,21 @@ pub fn load(handle: mpv.Handle, allocator: std.mem.Allocator) !Config {
     // 3. Override with mpv runtime script-opts properties (e.g. CLI --script-opts=koalasync-room=...)
     var cli_room_specified = false;
     if (readOpt(handle, allocator, "koalasync-room") catch readOpt(handle, allocator, "koalasync_room") catch readOpt(handle, allocator, "room") catch null) |cli_room| {
-        if (room_val) |prev| allocator.free(prev);
-        room_val = cli_room;
+        if (invite.parseInviteText(allocator, cli_room)) |inv| {
+            defer inv.deinit(allocator);
+            allocator.free(cli_room);
+            if (room_val) |prev| allocator.free(prev);
+            room_val = try allocator.dupe(u8, inv.room_id);
+            if (password_val == null and inv.password.len > 0) {
+                password_val = try allocator.dupe(u8, inv.password);
+            }
+            if (server_val == null and inv.server_url != null) {
+                server_val = try allocator.dupe(u8, inv.server_url.?);
+            }
+        } else {
+            if (room_val) |prev| allocator.free(prev);
+            room_val = cli_room;
+        }
         cli_room_specified = true;
     }
     if (readOpt(handle, allocator, "koalasync-server") catch readOpt(handle, allocator, "koalasync_server") catch readOpt(handle, allocator, "server") catch null) |cli_server| {
@@ -609,6 +664,48 @@ test "parseFavValue parses room, password, and label" {
     try std.testing.expectEqualStrings("simple-room", res3.room);
     try std.testing.expect(res3.pass == null);
     try std.testing.expect(res3.label == null);
+
+    const res4 = try parseFavValue(allocator, "https://sync.koalastuff.net/join.html#j2:r=INVITE-ROOM&p=INVITE-PASS&k=KEY=Watch Party");
+    defer allocator.free(res4.room);
+    defer if (res4.pass) |p| allocator.free(p);
+    defer if (res4.label) |l| allocator.free(l);
+    try std.testing.expectEqualStrings("INVITE-ROOM", res4.room);
+    try std.testing.expectEqualStrings("INVITE-PASS", res4.pass.?);
+    try std.testing.expectEqualStrings("Watch Party", res4.label.?);
+}
+
+test "processConfigContent parses invite links in room setting" {
+    const allocator = std.testing.allocator;
+
+    var server_val: ?[]const u8 = null;
+    defer if (server_val) |s| allocator.free(s);
+    var room_val: ?[]const u8 = null;
+    defer if (room_val) |r| allocator.free(r);
+    var password_val: ?[]const u8 = null;
+    defer if (password_val) |p| allocator.free(p);
+    var username_val: ?[]const u8 = null;
+    defer if (username_val) |u| allocator.free(u);
+    var autojoin_val: ?bool = null;
+    var slots = [_]Slot{.{}} ** 33;
+    defer {
+        for (&slots) |*slot| {
+            if (slot.room) |r| allocator.free(r);
+            if (slot.password) |p| allocator.free(p);
+            if (slot.label) |l| allocator.free(l);
+        }
+    }
+
+    const conf =
+        \\koalasync-room = https://sync.custom.org/join#j2:r=TEST-ROOM&p=TEST-PASS&k=KEY&u=wss%3A%2F%2Fsync.custom.org
+        \\koalasync-username = bob
+    ;
+
+    try processConfigContent(allocator, conf, &server_val, &room_val, &password_val, &username_val, &autojoin_val, &slots);
+
+    try std.testing.expectEqualStrings("TEST-ROOM", room_val.?);
+    try std.testing.expectEqualStrings("TEST-PASS", password_val.?);
+    try std.testing.expectEqualStrings("wss://sync.custom.org", server_val.?);
+    try std.testing.expectEqualStrings("bob", username_val.?);
 }
 
 test "parseBool handles common boolean representations" {
