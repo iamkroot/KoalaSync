@@ -324,6 +324,166 @@ pub fn parseInviteText(allocator: std.mem.Allocator, text: []const u8) ?ParsedIn
     return null;
 }
 
+/// Generates a 16-byte random chat secret and encodes it as a 22-character base64url string.
+pub fn generateChatKey(buf: *[22]u8) void {
+    var raw: [16]u8 = undefined;
+    var tv: std.c.timeval = undefined;
+    _ = std.c.gettimeofday(&tv, null);
+    const seed: u64 = @bitCast(@as(i64, @intCast(tv.sec)) * 1_000_000 + tv.usec);
+    var prng = std.Random.DefaultPrng.init(seed);
+    prng.random().bytes(&raw);
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    var src_i: usize = 0;
+    var dst_i: usize = 0;
+    while (src_i + 3 <= 16) : (src_i += 3) {
+        const b0 = raw[src_i];
+        const b1 = raw[src_i + 1];
+        const b2 = raw[src_i + 2];
+        buf[dst_i] = alphabet[b0 >> 2];
+        buf[dst_i + 1] = alphabet[((b0 & 0x03) << 4) | (b1 >> 4)];
+        buf[dst_i + 2] = alphabet[((b1 & 0x0F) << 2) | (b2 >> 6)];
+        buf[dst_i + 3] = alphabet[b2 & 0x3F];
+        dst_i += 4;
+    }
+    const b = raw[15];
+    buf[dst_i] = alphabet[b >> 2];
+    buf[dst_i + 1] = alphabet[(b & 0x03) << 4];
+}
+
+/// Implements URLSearchParams form-url-encoding (space -> '+', unreserved -> literal, others -> %XX).
+pub fn formUrlEncode(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var count: usize = 0;
+    for (input) |c| {
+        switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '*', '-', '.', '_' => count += 1,
+            ' ' => count += 1,
+            else => count += 3,
+        }
+    }
+    const out = try allocator.alloc(u8, count);
+    var i: usize = 0;
+    const hex = "0123456789ABCDEF";
+    for (input) |c| {
+        switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '*', '-', '.', '_' => {
+                out[i] = c;
+                i += 1;
+            },
+            ' ' => {
+                out[i] = '+';
+                i += 1;
+            },
+            else => {
+                out[i] = '%';
+                out[i + 1] = hex[c >> 4];
+                out[i + 2] = hex[c & 0x0F];
+                i += 3;
+            },
+        }
+    }
+    return out;
+}
+
+/// Standard URI component percent encoding matching encodeURIComponent.
+pub fn percentEncode(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var count: usize = 0;
+    for (input) |c| {
+        switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.', '!', '~', '*', '\'', '(', ')' => count += 1,
+            else => count += 3,
+        }
+    }
+    const out = try allocator.alloc(u8, count);
+    var i: usize = 0;
+    const hex = "0123456789ABCDEF";
+    for (input) |c| {
+        switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.', '!', '~', '*', '\'', '(', ')' => {
+                out[i] = c;
+                i += 1;
+            },
+            else => {
+                out[i] = '%';
+                out[i + 1] = hex[c >> 4];
+                out[i + 2] = hex[c & 0x0F];
+                i += 3;
+            },
+        }
+    }
+    return out;
+}
+
+/// Builds a modern #j2: hash matching buildJ2Hash in shared/invite-links.js.
+pub fn buildJ2Hash(
+    allocator: std.mem.Allocator,
+    room_id: []const u8,
+    password: []const u8,
+    chat_key: []const u8,
+    server_url: ?[]const u8,
+) ![]const u8 {
+    const enc_r = try formUrlEncode(allocator, room_id);
+    defer allocator.free(enc_r);
+    const enc_p = try formUrlEncode(allocator, password);
+    defer allocator.free(enc_p);
+    const enc_k = try formUrlEncode(allocator, chat_key);
+    defer allocator.free(enc_k);
+
+    if (server_url) |srv| {
+        if (srv.len > 0) {
+            const enc_u = try formUrlEncode(allocator, srv);
+            defer allocator.free(enc_u);
+            return std.fmt.allocPrint(allocator, "{s}r={s}&p={s}&k={s}&u={s}", .{
+                J2_PREFIX, enc_r, enc_p, enc_k, enc_u,
+            });
+        }
+    }
+    return std.fmt.allocPrint(allocator, "{s}r={s}&p={s}&k={s}", .{
+        J2_PREFIX, enc_r, enc_p, enc_k,
+    });
+}
+
+/// Builds a legacy #join: hash matching shared/invite-links.js.
+pub fn buildLegacyHash(
+    allocator: std.mem.Allocator,
+    room_id: []const u8,
+    password: []const u8,
+    server_url: ?[]const u8,
+) ![]const u8 {
+    if (server_url) |srv| {
+        if (srv.len > 0) {
+            const enc_u = try percentEncode(allocator, srv);
+            defer allocator.free(enc_u);
+            return std.fmt.allocPrint(allocator, "{s}{s}:{s}:1:{s}", .{
+                LEGACY_PREFIX, room_id, password, enc_u,
+            });
+        }
+    }
+    return std.fmt.allocPrint(allocator, "{s}{s}:{s}", .{
+        LEGACY_PREFIX, room_id, password,
+    });
+}
+
+/// Builds a complete join URL formatted for sharing (e.g. https://sync.koalastuff.net/join.html#j2:...).
+pub fn buildInviteLink(
+    allocator: std.mem.Allocator,
+    base_url: []const u8,
+    room_id: []const u8,
+    password: []const u8,
+    chat_key: []const u8,
+    server_url: ?[]const u8,
+) ![]const u8 {
+    const clean_base = std.mem.trimEnd(u8, base_url, "/");
+    if (chat_key.len > 0) {
+        const hash = try buildJ2Hash(allocator, room_id, password, chat_key, server_url);
+        defer allocator.free(hash);
+        return std.fmt.allocPrint(allocator, "{s}/join.html{s}", .{ clean_base, hash });
+    } else {
+        const hash = try buildLegacyHash(allocator, room_id, password, server_url);
+        defer allocator.free(hash);
+        return std.fmt.allocPrint(allocator, "{s}/join.html{s}", .{ clean_base, hash });
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────
 
 test "percentDecode basic and form mode" {
@@ -483,3 +643,101 @@ test "extracts invites from arbitrary pasted text and wrapping" {
     try std.testing.expect(parseInviteText(allocator, "https://example.com/join#j2:r=ROOM&p=PASS") == null);
     try std.testing.expect(parseInviteText(allocator, "") == null);
 }
+
+test "generateChatKey generates 22-char valid base64url keys" {
+    var k1: [22]u8 = undefined;
+    var k2: [22]u8 = undefined;
+    generateChatKey(&k1);
+    generateChatKey(&k2);
+
+    try std.testing.expectEqual(@as(usize, 22), k1.len);
+    try std.testing.expectEqual(@as(usize, 22), k2.len);
+    // Two random 16-byte keys should not be identical
+    try std.testing.expect(!std.mem.eql(u8, &k1, &k2));
+
+    for (k1) |c| {
+        const is_b64url = std.ascii.isAlphabetic(c) or std.ascii.isDigit(c) or c == '-' or c == '_';
+        try std.testing.expect(is_b64url);
+    }
+}
+
+test "formUrlEncode encodes spaces, symbols, and preserves alphanumerics" {
+    const allocator = std.testing.allocator;
+
+    const enc = try formUrlEncode(allocator, "Room 1 & Pass!");
+    defer allocator.free(enc);
+    try std.testing.expectEqualStrings("Room+1+%26+Pass%21", enc);
+}
+
+test "buildJ2Hash and buildInviteLink round-trip with parseInviteText" {
+    const allocator = std.testing.allocator;
+
+    const link = try buildInviteLink(
+        allocator,
+        "https://sync.koalastuff.net",
+        "MOVIE-NIGHT",
+        "secret pass",
+        "R5Ti1nxp0crfAFHf3gVncw",
+        null,
+    );
+    defer allocator.free(link);
+
+    try std.testing.expect(std.mem.startsWith(u8, link, "https://sync.koalastuff.net/join.html#j2:"));
+
+    var parsed = parseInviteText(allocator, link).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("MOVIE-NIGHT", parsed.room_id);
+    try std.testing.expectEqualStrings("secret pass", parsed.password);
+    try std.testing.expectEqualStrings("R5Ti1nxp0crfAFHf3gVncw", parsed.chat_key);
+    try std.testing.expect(!parsed.use_custom_server);
+    try std.testing.expect(parsed.server_url == null);
+}
+
+test "buildInviteLink with custom server round-trips" {
+    const allocator = std.testing.allocator;
+
+    const link = try buildInviteLink(
+        allocator,
+        "https://sync.koalastuff.net/",
+        "CUSTOM-ROOM",
+        "p@ss:word",
+        "AQEBAQEBAQEBAQEBAQEBAQ",
+        "wss://custom.relay.org:8443",
+    );
+    defer allocator.free(link);
+
+    var parsed = parseInviteText(allocator, link).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("CUSTOM-ROOM", parsed.room_id);
+    try std.testing.expectEqualStrings("p@ss:word", parsed.password);
+    try std.testing.expectEqualStrings("AQEBAQEBAQEBAQEBAQEBAQ", parsed.chat_key);
+    try std.testing.expect(parsed.use_custom_server);
+    try std.testing.expectEqualStrings("wss://custom.relay.org:8443", parsed.server_url.?);
+}
+
+test "buildLegacyHash and buildInviteLink round-trips" {
+    const allocator = std.testing.allocator;
+
+    const link = try buildInviteLink(
+        allocator,
+        "https://sync.koalastuff.net",
+        "LEGACY-ROOM",
+        "legacypass",
+        "",
+        "wss://legacy.relay",
+    );
+    defer allocator.free(link);
+
+    try std.testing.expect(std.mem.startsWith(u8, link, "https://sync.koalastuff.net/join.html#join:"));
+
+    var parsed = parseInviteText(allocator, link).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("LEGACY-ROOM", parsed.room_id);
+    try std.testing.expectEqualStrings("legacypass", parsed.password);
+    try std.testing.expect(parsed.use_custom_server);
+    try std.testing.expectEqualStrings("wss://legacy.relay", parsed.server_url.?);
+}
+

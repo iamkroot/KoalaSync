@@ -81,6 +81,7 @@ const lines = [
     `pub const protocol_version = "${extract('PROTOCOL_VERSION')}";`,
     `pub const app_version = "${extract('APP_VERSION')}";`,
     `pub const official_server_url = "${extract('OFFICIAL_SERVER_URL')}";`,
+    `pub const official_landing_page_url = "${extract('OFFICIAL_LANDING_PAGE_URL')}";`,
     `pub const official_server_token = "${extract('OFFICIAL_SERVER_TOKEN')}";`,
     '',
     `pub const max_media_time: f64 = ${extractNum('MAX_MEDIA_TIME') || 86400};`,

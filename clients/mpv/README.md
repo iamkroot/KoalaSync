@@ -72,6 +72,7 @@ The plugin registers default keybindings via mpv's `define-section` so all contr
 | Action | Default Hotkey | Script Message | Description |
 |---|---|---|---|
 | **Toggle Menu** | `Ctrl+k` or `c` | `script-message koalasync-menu` | Interactive in-player menu with 1-click favorite rooms (auto-routes to `uosc` if installed, else ASS overlay) |
+| **Copy Invite** | `Ctrl+Shift+c` | `script-message koalasync-copy-invite` | Copies current room invite link (`#j2:` URL) to clipboard |
 | **Paste Invite** | `Ctrl+v` | `script-message koalasync-paste` | Joins room directly from invite link in clipboard (v3.3.1 parity) |
 | **Join Prompt** | `Ctrl+Shift+j` | `script-message koalasync-join-prompt` | Opens mpv console prompt pre-filled with your favorite room |
 | **Join Room** | — | `script-message koalasync-join <room\|link> [pass]` | Joins a room directly (accepts room names or `#j2:`/`#join:` invite links) |
@@ -188,6 +189,7 @@ This preserves the repository's **single source of truth** principle. Run this a
 | Favorite rooms (numbered) & in-player switching | ✅ |
 | Full invite link parsing (#j2, #join, arbitrary URLs) | ✅ |
 | Paste invite links & direct clipboard join (Ctrl+V) | ✅ |
+| Copy invite link from room OSD menu & shortcut (Ctrl+Shift+C) | ✅ |
 
 ### Planned
 

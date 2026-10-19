@@ -8,6 +8,7 @@ const websocket = @import("websocket.zig");
 const sio = @import("socketio.zig");
 const K = @import("constants.zig");
 const time_mod = @import("time.zig");
+const invite = @import("invite.zig");
 
 pub const State = enum {
     disconnected,
@@ -81,6 +82,8 @@ pub const OutgoingEvent = struct {
     text2_len: u8 = 0,
     text3_buf: [128]u8 = [_]u8{0} ** 128,
     text3_len: u8 = 0,
+    text4_buf: [64]u8 = [_]u8{0} ** 64,
+    text4_len: u8 = 0,
 
     pub const Kind = enum {
         play,
@@ -124,6 +127,17 @@ pub const OutgoingEvent = struct {
         const len = @min(str.len, self.text3_buf.len);
         @memcpy(self.text3_buf[0..len], str[0..len]);
         self.text3_len = @intCast(len);
+    }
+
+    pub fn text4(self: *const OutgoingEvent) []const u8 {
+        if (self.text4_len == 0) return "";
+        return self.text4_buf[0..self.text4_len];
+    }
+
+    pub fn setText4(self: *OutgoingEvent, str: []const u8) void {
+        const len = @min(str.len, self.text4_buf.len);
+        @memcpy(self.text4_buf[0..len], str[0..len]);
+        self.text4_len = @intCast(len);
     }
 };
 
@@ -185,6 +199,7 @@ pub const Session = struct {
     use_tls: bool,
     room_id: ?[]u8 = null,
     password: []u8,
+    chat_key: []u8,
     peer_id: []const u8,
     username: []const u8,
     media_title: ?[]u8 = null,
@@ -329,6 +344,15 @@ pub const Session = struct {
         const duped_room = if (room_id) |r| (if (r.len > 0) try allocator.dupe(u8, r) else null) else null;
         const safe_peer_id = if (peer_id.len > 16) peer_id[0..16] else peer_id;
 
+        var chat_key_init: []u8 = undefined;
+        if (duped_room != null) {
+            var k_buf: [22]u8 = undefined;
+            invite.generateChatKey(&k_buf);
+            chat_key_init = try allocator.dupe(u8, &k_buf);
+        } else {
+            chat_key_init = try allocator.dupe(u8, "");
+        }
+
         return .{
             .allocator = allocator,
             .server_host = try allocator.dupe(u8, parsed.host),
@@ -337,6 +361,7 @@ pub const Session = struct {
             .use_tls = parsed.use_tls,
             .room_id = duped_room,
             .password = try allocator.dupe(u8, password),
+            .chat_key = chat_key_init,
             .peer_id = try allocator.dupe(u8, safe_peer_id),
             .username = try allocator.dupe(u8, username),
         };
@@ -348,6 +373,7 @@ pub const Session = struct {
         self.allocator.free(self.server_path);
         if (self.room_id) |r| self.allocator.free(r);
         self.allocator.free(self.password);
+        self.allocator.free(self.chat_key);
         self.allocator.free(self.peer_id);
         self.allocator.free(self.username);
         if (self.media_title) |mt| self.allocator.free(mt);
@@ -367,7 +393,13 @@ pub const Session = struct {
 
     // ── Thread-safe user controls interface ────────────────────
 
-    pub fn requestJoin(self: *Session, room: []const u8, password: ?[]const u8, server_url: ?[]const u8) void {
+    pub fn requestJoin(
+        self: *Session,
+        room: []const u8,
+        password: ?[]const u8,
+        server_url: ?[]const u8,
+        chat_key: ?[]const u8,
+    ) void {
         var evt = OutgoingEvent{ .kind = .join_room };
         evt.setText(room);
         if (password) |pass| {
@@ -375,6 +407,9 @@ pub const Session = struct {
         }
         if (server_url) |srv| {
             evt.setText3(srv);
+        }
+        if (chat_key) |ck| {
+            evt.setText4(ck);
         }
         self.mutex.lock();
         self.outgoing.push(evt);
@@ -422,6 +457,31 @@ pub const Session = struct {
             return buf[0..len];
         }
         return null;
+    }
+
+    pub fn getRoomInviteLink(self: *Session, allocator: std.mem.Allocator, base_url: []const u8) ?[]const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const room = self.room_id orelse return null;
+        if (room.len == 0) return null;
+
+        var custom_server: ?[]const u8 = null;
+        var srv_buf: [128]u8 = undefined;
+        const is_official = std.mem.eql(u8, self.server_host, "syncserver.koalastuff.net") and
+            (if (self.use_tls) self.server_port == 443 else self.server_port == 80);
+
+        if (!is_official) {
+            const scheme: []const u8 = if (self.use_tls) "wss://" else "ws://";
+            const default_port: u16 = if (self.use_tls) 443 else 80;
+            if (self.server_port == default_port) {
+                custom_server = std.fmt.bufPrint(&srv_buf, "{s}{s}", .{ scheme, self.server_host }) catch null;
+            } else {
+                custom_server = std.fmt.bufPrint(&srv_buf, "{s}{s}:{d}", .{ scheme, self.server_host, self.server_port }) catch null;
+            }
+        }
+
+        return invite.buildInviteLink(allocator, base_url, room, self.password, self.chat_key, custom_server) catch null;
     }
 
     pub fn updateLocalState(self: *Session, time: f64, paused: bool) void {
@@ -632,6 +692,15 @@ pub const Session = struct {
                     if (evt.text3_len > 0) {
                         _ = self.updateServer(evt.text3()) catch {};
                     }
+                    if (evt.text4_len > 0) {
+                        self.allocator.free(self.chat_key);
+                        self.chat_key = self.allocator.dupe(u8, evt.text4()) catch self.chat_key;
+                    } else {
+                        var k_buf: [22]u8 = undefined;
+                        invite.generateChatKey(&k_buf);
+                        self.allocator.free(self.chat_key);
+                        self.chat_key = self.allocator.dupe(u8, &k_buf) catch self.chat_key;
+                    }
                     self.reconnect_attempts = 0;
                 },
                 .leave_room => {
@@ -639,6 +708,8 @@ pub const Session = struct {
                         self.allocator.free(old);
                         self.room_id = null;
                     }
+                    self.allocator.free(self.chat_key);
+                    self.chat_key = self.allocator.dupe(u8, "") catch self.chat_key;
                     self.state = .disconnected;
                     self.clearPeers();
                     self.incoming.push(.{ .action = .left_room });
@@ -1154,6 +1225,15 @@ pub const Session = struct {
                     if (evt.text3_len > 0) {
                         server_changed = self.updateServer(evt.text3()) catch false;
                     }
+                    if (evt.text4_len > 0) {
+                        self.allocator.free(self.chat_key);
+                        self.chat_key = self.allocator.dupe(u8, evt.text4()) catch self.chat_key;
+                    } else {
+                        var k_buf: [22]u8 = undefined;
+                        invite.generateChatKey(&k_buf);
+                        self.allocator.free(self.chat_key);
+                        self.chat_key = self.allocator.dupe(u8, &k_buf) catch self.chat_key;
+                    }
                     self.mutex.unlock();
                     if (server_changed) {
                         if (self.ws) |*ws| ws.deinit();
@@ -1169,6 +1249,8 @@ pub const Session = struct {
                         self.allocator.free(old);
                         self.room_id = null;
                     }
+                    self.allocator.free(self.chat_key);
+                    self.chat_key = self.allocator.dupe(u8, "") catch self.chat_key;
                     self.state = .disconnected;
                     self.clearPeers();
                     self.incoming.push(.{ .action = .left_room });
@@ -1392,4 +1474,31 @@ test "Session parseServerUrl and updateServer" {
     const no_change = try s.updateServer("wss://custom.relay:8443");
     try std.testing.expect(!no_change);
 }
+
+test "Session getRoomInviteLink builds valid link" {
+    const allocator = std.testing.allocator;
+
+    var s = try Session.init(
+        allocator,
+        "wss://syncserver.koalastuff.net",
+        "movie-room",
+        "mypassword",
+        "mpv-1234",
+        "alice",
+    );
+    defer s.deinit();
+
+    const link = s.getRoomInviteLink(allocator, "https://sync.koalastuff.net").?;
+    defer allocator.free(link);
+
+    try std.testing.expect(std.mem.startsWith(u8, link, "https://sync.koalastuff.net/join.html#j2:"));
+
+    var parsed = invite.parseInviteText(allocator, link).?;
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("movie-room", parsed.room_id);
+    try std.testing.expectEqualStrings("mypassword", parsed.password);
+    try std.testing.expect(!parsed.use_custom_server);
+}
+
 
