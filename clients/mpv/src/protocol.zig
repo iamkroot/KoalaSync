@@ -79,6 +79,8 @@ pub const OutgoingEvent = struct {
     text_len: u8 = 0,
     text2_buf: [128]u8 = [_]u8{0} ** 128,
     text2_len: u8 = 0,
+    text3_buf: [128]u8 = [_]u8{0} ** 128,
+    text3_len: u8 = 0,
 
     pub const Kind = enum {
         play,
@@ -111,6 +113,17 @@ pub const OutgoingEvent = struct {
         const len = @min(str.len, self.text2_buf.len);
         @memcpy(self.text2_buf[0..len], str[0..len]);
         self.text2_len = @intCast(len);
+    }
+
+    pub fn text3(self: *const OutgoingEvent) []const u8 {
+        if (self.text3_len == 0) return "";
+        return self.text3_buf[0..self.text3_len];
+    }
+
+    pub fn setText3(self: *OutgoingEvent, str: []const u8) void {
+        const len = @min(str.len, self.text3_buf.len);
+        @memcpy(self.text3_buf[0..len], str[0..len]);
+        self.text3_len = @intCast(len);
     }
 };
 
@@ -255,15 +268,7 @@ pub const Session = struct {
 
     // ── Initialization ──────────────────────────────────────────
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        server_url: []const u8,
-        room_id: ?[]const u8,
-        password: []const u8,
-        peer_id: []const u8,
-        username: []const u8,
-    ) !Session {
-        // Parse URL: wss://host:port or ws://host:port
+    pub fn parseServerUrl(server_url: []const u8) struct { host: []const u8, port: u16, use_tls: bool } {
         var use_tls = true;
         var url_rest: []const u8 = server_url;
 
@@ -274,16 +279,46 @@ pub const Session = struct {
             use_tls = false;
         }
 
-        // Split host:port
         var host: []const u8 = url_rest;
         var port: u16 = if (use_tls) 443 else 80;
 
         if (std.mem.indexOfScalar(u8, url_rest, ':')) |colon| {
             host = url_rest[0..colon];
-            port = std.fmt.parseInt(u16, url_rest[colon + 1 ..], 10) catch port;
+            const port_str = url_rest[colon + 1 ..];
+            const port_end = std.mem.indexOfScalar(u8, port_str, '/') orelse port_str.len;
+            port = std.fmt.parseInt(u16, port_str[0..port_end], 10) catch port;
         } else if (std.mem.indexOfScalar(u8, url_rest, '/')) |slash| {
             host = url_rest[0..slash];
         }
+
+        return .{ .host = host, .port = port, .use_tls = use_tls };
+    }
+
+    pub fn updateServer(self: *Session, server_url: []const u8) !bool {
+        if (server_url.len == 0) return false;
+        const parsed = parseServerUrl(server_url);
+        if (std.mem.eql(u8, self.server_host, parsed.host) and
+            self.server_port == parsed.port and
+            self.use_tls == parsed.use_tls)
+        {
+            return false;
+        }
+        self.allocator.free(self.server_host);
+        self.server_host = try self.allocator.dupe(u8, parsed.host);
+        self.server_port = parsed.port;
+        self.use_tls = parsed.use_tls;
+        return true;
+    }
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        server_url: []const u8,
+        room_id: ?[]const u8,
+        password: []const u8,
+        peer_id: []const u8,
+        username: []const u8,
+    ) !Session {
+        const parsed = parseServerUrl(server_url);
 
         // Build upgrade path
         const path = try std.fmt.allocPrint(allocator,
@@ -296,10 +331,10 @@ pub const Session = struct {
 
         return .{
             .allocator = allocator,
-            .server_host = try allocator.dupe(u8, host),
-            .server_port = port,
+            .server_host = try allocator.dupe(u8, parsed.host),
+            .server_port = parsed.port,
             .server_path = path,
-            .use_tls = use_tls,
+            .use_tls = parsed.use_tls,
             .room_id = duped_room,
             .password = try allocator.dupe(u8, password),
             .peer_id = try allocator.dupe(u8, safe_peer_id),
@@ -332,11 +367,14 @@ pub const Session = struct {
 
     // ── Thread-safe user controls interface ────────────────────
 
-    pub fn requestJoin(self: *Session, room: []const u8, password: ?[]const u8) void {
+    pub fn requestJoin(self: *Session, room: []const u8, password: ?[]const u8, server_url: ?[]const u8) void {
         var evt = OutgoingEvent{ .kind = .join_room };
         evt.setText(room);
         if (password) |pass| {
             evt.setText2(pass);
+        }
+        if (server_url) |srv| {
+            evt.setText3(srv);
         }
         self.mutex.lock();
         self.outgoing.push(evt);
@@ -590,6 +628,9 @@ pub const Session = struct {
                     if (evt.text2_len > 0) {
                         self.allocator.free(self.password);
                         self.password = self.allocator.dupe(u8, evt.text2()) catch self.password;
+                    }
+                    if (evt.text3_len > 0) {
+                        _ = self.updateServer(evt.text3()) catch {};
                     }
                     self.reconnect_attempts = 0;
                 },
@@ -1109,7 +1150,16 @@ pub const Session = struct {
                         self.allocator.free(self.password);
                         self.password = self.allocator.dupe(u8, evt.text2()) catch self.password;
                     }
+                    var server_changed = false;
+                    if (evt.text3_len > 0) {
+                        server_changed = self.updateServer(evt.text3()) catch false;
+                    }
                     self.mutex.unlock();
+                    if (server_changed) {
+                        if (self.ws) |*ws| ws.deinit();
+                        self.ws = null;
+                        return;
+                    }
                     try self.sendJoinRoom();
                 },
                 .leave_room => {
@@ -1307,5 +1357,39 @@ test "Session getRosterSnapshot includes local player when joined" {
 
     // Entry 1 is remote peer
     try std.testing.expectEqualStrings("ZenMongoose", out[1].username());
+}
+
+test "Session parseServerUrl and updateServer" {
+    const allocator = std.testing.allocator;
+
+    const p1 = Session.parseServerUrl("wss://relay.example.org");
+    try std.testing.expectEqualStrings("relay.example.org", p1.host);
+    try std.testing.expectEqual(@as(u16, 443), p1.port);
+    try std.testing.expect(p1.use_tls);
+
+    const p2 = Session.parseServerUrl("ws://localhost:8080/path");
+    try std.testing.expectEqualStrings("localhost", p2.host);
+    try std.testing.expectEqual(@as(u16, 8080), p2.port);
+    try std.testing.expect(!p2.use_tls);
+
+    var s = try Session.init(
+        allocator,
+        "wss://official.relay",
+        null,
+        "",
+        "mpv-1234",
+        "alice",
+    );
+    defer s.deinit();
+
+    try std.testing.expectEqualStrings("official.relay", s.server_host);
+
+    const changed = try s.updateServer("wss://custom.relay:8443");
+    try std.testing.expect(changed);
+    try std.testing.expectEqualStrings("custom.relay", s.server_host);
+    try std.testing.expectEqual(@as(u16, 8443), s.server_port);
+
+    const no_change = try s.updateServer("wss://custom.relay:8443");
+    try std.testing.expect(!no_change);
 }
 

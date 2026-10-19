@@ -10,6 +10,7 @@ const config_mod = @import("config.zig");
 const protocol = @import("protocol.zig");
 const K = @import("constants.zig");
 const time_util = @import("time.zig");
+const invite = @import("invite.zig");
 const c = @cImport(@cInclude("mpv/client.h"));
 
 // ── Property observation user-data keys ─────────────────────────
@@ -49,6 +50,7 @@ const MenuActionKind = enum {
     fav_add,
     fav_remove,
     join_prompt,
+    paste_invite,
     leave_room,
     close,
 };
@@ -154,6 +156,12 @@ fn buildMenuActions(
         actions[count].label_len = l_jp.len;
         count += 1;
 
+        actions[count] = .{ .kind = .paste_invite };
+        const l_pi = "Paste Invite Link (Ctrl+V)";
+        @memcpy(actions[count].label[0..l_pi.len], l_pi);
+        actions[count].label_len = l_pi.len;
+        count += 1;
+
         actions[count] = .{ .kind = .toggle_sync };
         const l_ts = "Toggle Sync Mute";
         @memcpy(actions[count].label[0..l_ts.len], l_ts);
@@ -220,6 +228,35 @@ fn isUoscPresent(handle: mpv.Handle, allocator: std.mem.Allocator, has_uosc: boo
     return false;
 }
 
+extern fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern fn pclose(stream: *anyopaque) c_int;
+extern fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
+extern fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+
+fn readClipboard(allocator: std.mem.Allocator) ?[]const u8 {
+    const builtin = @import("builtin");
+    const cmd: [*:0]const u8 = switch (builtin.os.tag) {
+        .macos => "pbpaste",
+        .windows => "powershell -NoProfile -Command Get-Clipboard",
+        else => blk: {
+            if (getenv("WAYLAND_DISPLAY") != null) {
+                break :blk "wl-paste --no-newline 2>/dev/null || xclip -selection clipboard -out 2>/dev/null";
+            } else {
+                break :blk "xclip -selection clipboard -out 2>/dev/null || wl-paste --no-newline 2>/dev/null";
+            }
+        },
+    };
+
+    const pipe = popen(cmd, "r") orelse return null;
+    defer _ = pclose(pipe);
+
+    var buf: [4096]u8 = undefined;
+    const n = fread(&buf, 1, buf.len, pipe);
+    if (n == 0) return null;
+
+    return allocator.dupe(u8, buf[0..n]) catch null;
+}
+
 // ── Entry point ─────────────────────────────────────────────────
 
 export fn mpv_open_cplugin(handle: *c.mpv_handle) callconv(.c) c_int {
@@ -242,6 +279,7 @@ fn main_impl(handle: mpv.Handle) !void {
         "ctrl+k script-message koalasync-menu\n" ++
         "c script-message koalasync-menu\n" ++
         "ctrl+shift+j script-message koalasync-join-prompt\n" ++
+        "ctrl+v script-message koalasync-paste\n" ++
         "ctrl+shift+s script-message koalasync-force-sync\n" ++
         "alt+s script-message koalasync-force-sync\n" ++
         "ctrl+shift+t script-message koalasync-toggle-sync\n" ++
@@ -358,10 +396,38 @@ fn main_impl(handle: mpv.Handle) !void {
 
                     if (std.mem.eql(u8, cmd_name, "koalasync-join")) {
                         if (msg.num_args > 1 and args[1] != null) {
-                            const target_room = std.mem.sliceTo(args[1].?, 0);
-                            const target_pass: ?[]const u8 = if (msg.num_args > 2 and args[2] != null) std.mem.sliceTo(args[2].?, 0) else null;
-                            session.requestJoin(target_room, target_pass);
-                            mpv.osdMessage(handle, allocator, "KoalaSync: connecting to room \"{s}\"…", .{target_room}, 3.0);
+                            const raw_target = std.mem.sliceTo(args[1].?, 0);
+                            const raw_pass: ?[]const u8 = if (msg.num_args > 2 and args[2] != null) std.mem.sliceTo(args[2].?, 0) else null;
+
+                            if (invite.parseInviteText(allocator, raw_target)) |inv| {
+                                defer inv.deinit(allocator);
+                                const pass = if (inv.password.len > 0) inv.password else raw_pass;
+                                session.requestJoin(inv.room_id, pass, inv.server_url);
+                                mpv.osdMessage(handle, allocator, "KoalaSync: connecting to room \"{s}\"…", .{inv.room_id}, 3.0);
+                            } else {
+                                session.requestJoin(raw_target, raw_pass, null);
+                                mpv.osdMessage(handle, allocator, "KoalaSync: connecting to room \"{s}\"…", .{raw_target}, 3.0);
+                            }
+                        }
+                    } else if (std.mem.eql(u8, cmd_name, "koalasync-paste")) {
+                        if (session.state == .joined) {
+                            mpv.osdMessage(handle, allocator, "KoalaSync: leave current room first (Ctrl+Shift+L)", .{}, 3.5);
+                        } else {
+                            const clip_text = readClipboard(allocator);
+                            defer if (clip_text) |ct| allocator.free(ct);
+
+                            if (clip_text) |ct| {
+                                if (invite.parseInviteText(allocator, ct)) |inv| {
+                                    defer inv.deinit(allocator);
+                                    const pass = if (inv.password.len > 0) inv.password else null;
+                                    session.requestJoin(inv.room_id, pass, inv.server_url);
+                                    mpv.osdMessage(handle, allocator, "KoalaSync: joining \"{s}\" from clipboard…", .{inv.room_id}, 3.0);
+                                } else {
+                                    mpv.osdMessage(handle, allocator, "KoalaSync: invalid invite link in clipboard", .{}, 3.5);
+                                }
+                            } else {
+                                mpv.osdMessage(handle, allocator, "KoalaSync: could not read clipboard", .{}, 3.5);
+                            }
                         }
                     } else if (std.mem.eql(u8, cmd_name, "koalasync-join-prompt")) {
                         var prompt_buf: [128]u8 = undefined;
@@ -383,7 +449,7 @@ fn main_impl(handle: mpv.Handle) !void {
                             if (fav_num >= 1 and fav_num <= favorites.items.len) {
                                 const fav = favorites.items[fav_num - 1];
                                 const pass: ?[]const u8 = if (fav.password.len > 0) fav.password else null;
-                                session.requestJoin(fav.room, pass);
+                                session.requestJoin(fav.room, pass, null);
                                 mpv.osdMessage(handle, allocator, "KoalaSync: connecting to ★ \"{s}\"…", .{fav.label}, 3.0);
                             }
                         }
@@ -811,8 +877,30 @@ fn menuSelect(
             if (action.fav_idx < favorites.items.len) {
                 const fav = favorites.items[action.fav_idx];
                 const pass: ?[]const u8 = if (fav.password.len > 0) fav.password else null;
-                session.requestJoin(fav.room, pass);
+                session.requestJoin(fav.room, pass, null);
                 mpv.osdMessage(handle, allocator, "KoalaSync: connecting to room \"{s}\"…", .{fav.room}, 3.0);
+            }
+        },
+        .paste_invite => {
+            closeMenu(handle, state);
+            if (session.state == .joined) {
+                mpv.osdMessage(handle, allocator, "KoalaSync: leave current room first (Ctrl+Shift+L)", .{}, 3.5);
+            } else {
+                const clip_text = readClipboard(allocator);
+                defer if (clip_text) |ct| allocator.free(ct);
+
+                if (clip_text) |ct| {
+                    if (invite.parseInviteText(allocator, ct)) |inv| {
+                        defer inv.deinit(allocator);
+                        const pass = if (inv.password.len > 0) inv.password else null;
+                        session.requestJoin(inv.room_id, pass, inv.server_url);
+                        mpv.osdMessage(handle, allocator, "KoalaSync: joining \"{s}\" from clipboard…", .{inv.room_id}, 3.0);
+                    } else {
+                        mpv.osdMessage(handle, allocator, "KoalaSync: invalid invite link in clipboard", .{}, 3.5);
+                    }
+                } else {
+                    mpv.osdMessage(handle, allocator, "KoalaSync: could not read clipboard", .{}, 3.5);
+                }
             }
         },
         .fav_add => {
@@ -1196,6 +1284,19 @@ fn renderUoscMenu(handle: mpv.Handle, session: *protocol.Session, favorites: []c
         .{},
     ) catch return;
     pos += jp_item.len;
+    need_comma = true;
+
+    // Paste Invite Link
+    if (need_comma) {
+        buf[pos] = ',';
+        pos += 1;
+    }
+    const pi_item = std.fmt.bufPrint(
+        buf[pos..],
+        "{{\"title\":\"Paste Invite Link\",\"hint\":\"Ctrl+V\",\"icon\":\"content_paste\",\"value\":\"script-message koalasync-paste\"}}",
+        .{},
+    ) catch return;
+    pos += pi_item.len;
     need_comma = true;
 
     // Standby mute toggle

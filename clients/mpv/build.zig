@@ -72,8 +72,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_protocol_tests = b.addRunArtifact(protocol_tests);
 
+    const invite_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/invite.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const invite_tests = b.addTest(.{
+        .root_module = invite_test_mod,
+    });
+    const run_invite_tests = b.addRunArtifact(invite_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_config_tests.step);
     test_step.dependOn(&run_protocol_tests.step);
+    test_step.dependOn(&run_invite_tests.step);
 }
