@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/invite.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     const invite_tests = b.addTest(.{
         .root_module = invite_test_mod,
