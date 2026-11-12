@@ -5,6 +5,14 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // ── Module ──────────────────────────────────────────────────
+    const c_step = b.addTranslateC(.{
+        .root_source_file = b.path("include/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_step.addIncludePath(b.path("include"));
+    const c_mod = c_step.createModule();
+
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -12,6 +20,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mod.addIncludePath(b.path("include"));
+    mod.addImport("c", c_mod);
     mod.linkSystemLibrary("ssl", .{});
     mod.linkSystemLibrary("crypto", .{});
 
@@ -54,6 +63,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     config_test_mod.addIncludePath(b.path("include"));
+    config_test_mod.addImport("c", c_mod);
     const config_tests = b.addTest(.{
         .root_module = config_test_mod,
     });
@@ -65,6 +75,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    protocol_test_mod.addImport("c", c_mod);
     protocol_test_mod.linkSystemLibrary("ssl", .{});
     protocol_test_mod.linkSystemLibrary("crypto", .{});
     const protocol_tests = b.addTest(.{

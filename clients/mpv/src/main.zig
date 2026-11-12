@@ -11,7 +11,7 @@ const protocol = @import("protocol.zig");
 const K = @import("constants.zig");
 const time_util = @import("time.zig");
 const invite = @import("invite.zig");
-const c = @cImport(@cInclude("mpv/client.h"));
+const c = @import("c");
 
 // ── Property observation user-data keys ─────────────────────────
 const UD_PAUSE: u64 = 1;
@@ -485,7 +485,7 @@ fn main_impl(handle: mpv.Handle) !void {
                         var prompt_buf: [128]u8 = undefined;
                         const default_prompt: [*:0]const u8 = "script-message-to console type \"script-message koalasync-join \"";
                         const prompt_cmd: [*:0]const u8 = if (favorites.items.len > 0)
-                            if (std.fmt.bufPrintZ(&prompt_buf, "script-message-to console type \"script-message koalasync-join {s} \"", .{favorites.items[0].room})) |z|
+                            if (std.fmt.bufPrintSentinel(&prompt_buf, "script-message-to console type \"script-message koalasync-join {s} \"", .{favorites.items[0].room}, 0)) |z|
                                 z.ptr
                             else |_|
                                 default_prompt
@@ -1019,7 +1019,7 @@ fn menuSelect(
             var prompt_buf: [128]u8 = undefined;
             const default_prompt: [*:0]const u8 = "script-message-to console type \"script-message koalasync-join \"";
             const prompt_cmd: [*:0]const u8 = if (favorites.items.len > 0)
-                if (std.fmt.bufPrintZ(&prompt_buf, "script-message-to console type \"script-message koalasync-join {s} \"", .{favorites.items[0].room})) |z|
+                if (std.fmt.bufPrintSentinel(&prompt_buf, "script-message-to console type \"script-message koalasync-join {s} \"", .{favorites.items[0].room}, 0)) |z|
                     z.ptr
                 else |_|
                     default_prompt

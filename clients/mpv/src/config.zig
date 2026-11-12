@@ -297,7 +297,7 @@ pub fn load(handle: mpv.Handle, allocator: std.mem.Allocator) !Config {
     var username_val: ?[]const u8 = null;
     var autojoin_val: ?bool = null;
 
-    var slots = [_]Slot{.{}} ** 33;
+    var slots: [33]Slot = @splat(.{});
     defer {
         for (&slots) |*slot| {
             if (slot.room) |r| allocator.free(r);
@@ -686,7 +686,7 @@ test "processConfigContent parses invite links in room setting" {
     var username_val: ?[]const u8 = null;
     defer if (username_val) |u| allocator.free(u);
     var autojoin_val: ?bool = null;
-    var slots = [_]Slot{.{}} ** 33;
+    var slots: [33]Slot = @splat(.{});
     defer {
         for (&slots) |*slot| {
             if (slot.room) |r| allocator.free(r);

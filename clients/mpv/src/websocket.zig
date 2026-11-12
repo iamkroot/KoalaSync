@@ -5,15 +5,7 @@
 const std = @import("std");
 const time = @import("time.zig");
 
-const c = @cImport({
-    @cInclude("sys/socket.h");
-    @cInclude("netinet/in.h");
-    @cInclude("netinet/tcp.h");
-    @cInclude("netdb.h");
-    @cInclude("unistd.h");
-    @cInclude("openssl/ssl.h");
-    @cInclude("openssl/err.h");
-});
+const c = @import("c");
 
 pub const Error = error{
     ConnectionFailed,
