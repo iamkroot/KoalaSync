@@ -340,7 +340,7 @@ fn main_impl(handle: mpv.Handle) !void {
         "ctrl+shift+f script-message koalasync-fav-toggle";
 
     mpv.defineSection(handle, "koalasync", default_bindings, "default");
-    mpv.enableSection(handle, "koalasync", "default");
+    mpv.enableSection(handle, "koalasync", "allow-hide-cursor+allow-vo-dragging");
 
     // ── Register menu navigation keys ───────────────────────────
     const menu_nav_bindings =
@@ -879,7 +879,7 @@ fn toggleMenu(
     // Fall back to built-in ASS menu
     state.is_uosc = false;
     state.selected_index = 0;
-    mpv.enableSection(handle, "koalasync-menu", "force");
+    mpv.enableSection(handle, "koalasync-menu", "force+allow-hide-cursor+allow-vo-dragging");
     renderMenu(handle, allocator, session, favorites, state);
 }
 
