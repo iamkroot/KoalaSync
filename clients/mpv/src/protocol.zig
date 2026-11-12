@@ -22,9 +22,9 @@ pub const MpvCommand = struct {
     action: Action,
     time: f64 = 0,
     playback_state: ?PlaybackState = null,
-    text_buf: [128]u8 = [_]u8{0} ** 128,
+    text_buf: [128]u8 = @splat(0),
     text_len: u8 = 0,
-    text2_buf: [128]u8 = [_]u8{0} ** 128,
+    text2_buf: [128]u8 = @splat(0),
     text2_len: u8 = 0,
 
     pub const Action = enum {
@@ -76,13 +76,13 @@ pub const OutgoingEvent = struct {
     kind: Kind,
     time: f64 = 0,
     paused: bool = false,
-    text_buf: [128]u8 = [_]u8{0} ** 128,
+    text_buf: [128]u8 = @splat(0),
     text_len: u8 = 0,
-    text2_buf: [128]u8 = [_]u8{0} ** 128,
+    text2_buf: [128]u8 = @splat(0),
     text2_len: u8 = 0,
-    text3_buf: [128]u8 = [_]u8{0} ** 128,
+    text3_buf: [128]u8 = @splat(0),
     text3_len: u8 = 0,
-    text4_buf: [64]u8 = [_]u8{0} ** 64,
+    text4_buf: [64]u8 = @splat(0),
     text4_len: u8 = 0,
 
     pub const Kind = enum {
@@ -143,9 +143,9 @@ pub const OutgoingEvent = struct {
 
 /// Information about a connected peer in the current room.
 pub const PeerInfo = struct {
-    id_buf: [48]u8 = [_]u8{0} ** 48,
+    id_buf: [48]u8 = @splat(0),
     id_len: u8 = 0,
-    username_buf: [48]u8 = [_]u8{0} ** 48,
+    username_buf: [48]u8 = @splat(0),
     username_len: u8 = 0,
     time_pos: f64 = 0,
     last_update_ms: i64 = 0,
@@ -220,7 +220,7 @@ pub const Session = struct {
 
     // User controls state
     sync_muted: bool = false,
-    peers: [32]PeerInfo = [_]PeerInfo{.{}} ** 32,
+    peers: [32]PeerInfo = @splat(.{}),
     server_ping_ms: u32 = 0,
     local_time: f64 = 0,
     local_paused: bool = true,

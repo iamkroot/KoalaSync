@@ -5,7 +5,7 @@
 /// returned by mpv are either consumed immediately or copied into
 /// the caller-supplied allocator.
 const std = @import("std");
-const c = @cImport(@cInclude("mpv/client.h"));
+const c = @import("c");
 
 pub const Handle = *c.mpv_handle;
 pub const Event = c.mpv_event;
@@ -104,7 +104,7 @@ pub fn osdMessage(handle: Handle, allocator: std.mem.Allocator, comptime fmt: []
 /// Render an ASS overlay with given numeric ID (e.g. 1 for menu, 2 for HUD).
 pub fn showOsdOverlay(handle: Handle, id: u32, ass_text: [*:0]const u8) void {
     var id_buf: [16]u8 = undefined;
-    const id_str = std.fmt.bufPrintZ(&id_buf, "{d}", .{id}) catch return;
+    const id_str = std.fmt.bufPrintSentinel(&id_buf, "{d}", .{id}, 0) catch return;
     var cmd = [_:null]?[*:0]const u8{ "osd-overlay", id_str.ptr, "ass-events", ass_text, null };
     _ = c.mpv_command(handle, @ptrCast(@constCast(&cmd)));
 }
@@ -112,7 +112,7 @@ pub fn showOsdOverlay(handle: Handle, id: u32, ass_text: [*:0]const u8) void {
 /// Remove an ASS overlay by ID.
 pub fn clearOsdOverlay(handle: Handle, id: u32) void {
     var id_buf: [16]u8 = undefined;
-    const id_str = std.fmt.bufPrintZ(&id_buf, "{d}", .{id}) catch return;
+    const id_str = std.fmt.bufPrintSentinel(&id_buf, "{d}", .{id}, 0) catch return;
     var cmd = [_:null]?[*:0]const u8{ "osd-overlay", id_str.ptr, "none", "", null };
     _ = c.mpv_command(handle, @ptrCast(@constCast(&cmd)));
 }
